@@ -1,5 +1,7 @@
 package com.linkedin.openhouse.tables.config;
 
+import static com.linkedin.openhouse.common.Constants.*;
+
 import com.linkedin.openhouse.cluster.metrics.TagUtils;
 import com.linkedin.openhouse.cluster.storage.FsStorageUtils;
 import com.linkedin.openhouse.cluster.storage.StorageManager;
@@ -14,10 +16,8 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Paths;
 import java.time.Duration;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
@@ -47,10 +47,6 @@ public class MainApplicationConfig extends BaseApplicationConfig {
   public static final String APP_NAME = "tables";
   private static final Pattern VERSION_PART_PATTERN = Pattern.compile("v[0-9]+");
   private static final int IN_MEMORY_BUFFER_SIZE = 10 * 1000 * 1024;
-
-  public static final String HEADER_X_CLIENT_NAME = "X-Client-Name";
-  public static final String METRIC_KEY_CLIENT_NAME = "client_name";
-  public static final List<String> ALLOWED_CLIENT_NAMES = Arrays.asList("trino", "spark");
 
   private static final int DNS_QUERY_TIMEOUT_SECONDS = 10;
 
@@ -94,12 +90,14 @@ public class MainApplicationConfig extends BaseApplicationConfig {
           HttpServletResponse response,
           Object handler,
           Throwable exception) {
-        String clientName = request.getHeader(HEADER_X_CLIENT_NAME);
+        String clientName = request.getHeader(HTTPHEADER_CLIENT_NAME);
 
         return Collections.singletonList(
             Tag.of(
                 METRIC_KEY_CLIENT_NAME,
-                ALLOWED_CLIENT_NAMES.contains(clientName) ? clientName : ""));
+                ALLOWED_CLIENT_NAME_VALUES.contains(clientName)
+                    ? clientName
+                    : HTTPHEADER_CLIENT_NAME_DEFAULT_VALUE));
       }
 
       @Override
