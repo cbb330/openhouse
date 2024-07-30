@@ -97,7 +97,7 @@ public class MainApplicationConfig extends BaseApplicationConfig {
                 METRIC_KEY_CLIENT_NAME,
                 ALLOWED_CLIENT_NAME_VALUES.contains(clientName)
                     ? clientName
-                    : HTTPHEADER_CLIENT_NAME_DEFAULT_VALUE));
+                    : CLIENT_NAME_DEFAULT_VALUE));
       }
 
       @Override

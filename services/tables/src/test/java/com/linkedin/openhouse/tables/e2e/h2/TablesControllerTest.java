@@ -139,7 +139,7 @@ public class TablesControllerTest {
     Assertions.assertNotNull(
         this.registry
             .get("http.server.requests")
-            .tags(METRIC_KEY_CLIENT_NAME, HTTPHEADER_CLIENT_NAME_DEFAULT_VALUE)
+            .tags(METRIC_KEY_CLIENT_NAME, CLIENT_NAME_DEFAULT_VALUE)
             .timer());
   }
 
@@ -152,7 +152,7 @@ public class TablesControllerTest {
     Assertions.assertNotNull(
         this.registry
             .get("http.server.requests")
-            .tags("client_name", HTTPHEADER_CLIENT_NAME_DEFAULT_VALUE)
+            .tags("client_name", CLIENT_NAME_DEFAULT_VALUE)
             .timer());
   }
 
