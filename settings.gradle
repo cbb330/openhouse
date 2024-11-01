@@ -25,6 +25,7 @@ pluginManagement {
 rootProject.name = 'openhouse'
 
 include ':apps:spark'
+include 'apps:spark_3_3'
 
 include ':client:common'
 include ':client:hts'
@@ -59,3 +60,4 @@ include ':scripts:java:tools:dummytokens'
 project(':integrations:spark:openhouse-spark-runtime').name = 'openhouse-spark-runtime_2.12'
 project(':apps:spark').name = 'openhouse-spark-apps_2.12'
 project(':tables-test-fixtures').name = 'tables-test-fixtures_2.12'
+project(':apps:spark_3_3').name = 'openhouse-spark-apps_3.3_2.12'

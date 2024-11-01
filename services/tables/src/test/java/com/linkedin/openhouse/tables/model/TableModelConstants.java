@@ -116,6 +116,14 @@ public final class TableModelConstants {
         }
       };
 
+  public static final Map<String, String> TABLE_PROPS_RESERVED_MOR =
+      new HashMap<String, String>() {
+        {
+          put("user.a", "b");
+          put("openhouse.random", "random");
+        }
+      };
+
   private TableModelConstants() {}
 
   // Essentially a clone of TableDto with schema field being decorated.
@@ -209,6 +217,30 @@ public final class TableModelConstants {
           .tableVersion(String.valueOf(new Random().nextLong()))
           .tableUUID(UUID.randomUUID().toString())
           .tableProperties(buildTableProperties(TABLE_PROPS_RESERVED))
+          .tableCreator(TEST_USER)
+          .schema(HEALTH_SCHEMA_LITERAL)
+          .policies(TABLE_POLICIES)
+          .timePartitioning(
+              TimePartitionSpec.builder()
+                  .columnName("timestampCol")
+                  .granularity(TimePartitionSpec.Granularity.HOUR)
+                  .build())
+          .clustering(
+              Arrays.asList(
+                  ClusteringColumn.builder().columnName("name").build(),
+                  ClusteringColumn.builder().columnName("id").build()))
+          .build();
+
+  public static final GetTableResponseBody GET_TABLE_RESPONSE_BODY_MOR_ENABLED_PROP =
+      GetTableResponseBody.builder()
+          .tableId("t1")
+          .databaseId("d1")
+          .clusterId(CLUSTER_NAME)
+          .tableUri(CLUSTER_NAME + ".d1.t1")
+          .tableLocation("loc1")
+          .tableVersion(String.valueOf(new Random().nextLong()))
+          .tableUUID(UUID.randomUUID().toString())
+          .tableProperties(buildTableProperties(TABLE_PROPS_RESERVED_MOR))
           .tableCreator(TEST_USER)
           .schema(HEALTH_SCHEMA_LITERAL)
           .policies(TABLE_POLICIES)
