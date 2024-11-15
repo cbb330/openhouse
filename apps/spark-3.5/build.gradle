@@ -5,14 +5,14 @@ plugins {
 }
 
 ext {
-    log4jVersion = "2.18.0"
+    log4jVersion = "2.20.0"
 
-    sparkVersion = '3.1.1'
-    icebergVersion = '1.2.0'
-    sparkVersionSuffix = ""
+    sparkVersion = '3.5.2'
+    icebergVersion = '1.5.2'
+    sparkVersionSuffix = "-3.5"
     openhouseSparkRuntimeModule = ":integrations:spark${sparkVersionSuffix}:openhouse-spark${sparkVersionSuffix}-runtime_2.12"
-    icebergSparkRuntimeModule = "org.apache.iceberg:iceberg-spark-runtime-3.1_2.12:${icebergVersion}"
-    tablesTestFixturesModule = ":tables-test-fixtures_2.12"
+    icebergSparkRuntimeModule = "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:${icebergVersion}"
+    tablesTestFixturesModule = ":tables-test-fixtures-iceberg-1.5_2.12"
 }
 
 dependencies {

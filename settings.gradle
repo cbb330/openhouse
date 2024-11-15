@@ -24,7 +24,9 @@ pluginManagement {
 
 rootProject.name = 'openhouse'
 
+include ':apps'
 include ':apps:spark'
+include ':apps:spark-3.5'
 
 include ':client:common'
 include ':client:hts'
