@@ -15,8 +15,28 @@ ext {
     tablesTestFixturesModule = ":tables-test-fixtures-iceberg-1.5_2.12"
 }
 
+configurations.all {
+    resolutionStrategy.eachDependency { details ->
+        if (details.requested.group == "org.apache.iceberg" &&
+            details.requested.name != "iceberg-spark-runtime-3.1_2.12") {
+            details.useVersion(icebergVersion)
+        }
+    }
+}
+
 dependencies {
     implementation "org.apache.logging.log4j:log4j-slf4j-impl:${log4jVersion}"
+
+    implementation(project(':libs:datalayout')) {
+        exclude group: 'org.apache.iceberg', module: 'iceberg-spark-runtime-3.1_2.12'
+    }
+
+    implementation("org.apache.iceberg:iceberg-bundled-guava:${icebergVersion}")
+    implementation("org.apache.iceberg:iceberg-data:${icebergVersion}")
+    implementation("org.apache.iceberg:iceberg-core:${icebergVersion}")
+    implementation("org.apache.iceberg:iceberg-common:${icebergVersion}")
+
+
 
     compileOnly (project(path: openhouseSparkRuntimeModule)) {
         exclude group: 'io.netty'
@@ -51,4 +71,15 @@ dependencies {
     }
 }
 
-test.dependsOn "${openhouseSparkRuntimeModule}:build"
+sourceSets {
+    main {
+        java {
+            srcDirs = ['src/main/java', project(':apps:openhouse-spark-apps_2.12').sourceSets.main.java.srcDirs]
+        }
+    }
+    test {
+        java {
+            srcDirs = ['src/test/java', project(':apps:openhouse-spark-apps_2.12').sourceSets.test.java.srcDirs]
+        }
+    }
+}
