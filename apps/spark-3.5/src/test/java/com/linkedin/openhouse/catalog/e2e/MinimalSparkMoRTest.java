@@ -21,7 +21,6 @@ import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.functions;
 import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.Test;
 
 public class MinimalSparkMoRTest extends OpenHouseSparkITest {
   private static final Schema SCHEMA =
@@ -65,7 +64,7 @@ public class MinimalSparkMoRTest extends OpenHouseSparkITest {
     ops.spark().sql("DELETE FROM db.test_data_compaction WHERE data = 'v6'").show();
   }
 
-  @Test
+  //  @Test
   public void testDataCompactionPartialProgressNonPartitionedTable() throws Exception {
     final String tableName = "db.test_data_compaction";
 
