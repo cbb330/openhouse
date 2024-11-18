@@ -1,7 +1,6 @@
 plugins {
     id 'openhouse.java-conventions'
     id 'openhouse.hadoop-conventions'
-    id 'openhouse.iceberg-conventions-1.5.2'
     id 'openhouse.maven-publish'
 }
 
@@ -14,6 +13,11 @@ ext {
 
 dependencies {
     compileOnly project(':integrations:spark:openhouse-spark-runtime_2.12')
+    implementation('org.apache.iceberg:iceberg-bundled-guava:' + icebergVersion)
+    implementation('org.apache.iceberg:iceberg-data:' + icebergVersion)
+    implementation('org.apache.iceberg:iceberg-core:' + icebergVersion)
+    implementation('org.apache.iceberg:iceberg-common:' + icebergVersion)
+    implementation('org.testcontainers:testcontainers:1.19.8')
     implementation ('org.apache.spark:spark-core_2.12:' + sparkVersion) {
         exclude group: 'io.netty'
         exclude group: 'org.apache.hadoop', module: 'hadoop-common'
