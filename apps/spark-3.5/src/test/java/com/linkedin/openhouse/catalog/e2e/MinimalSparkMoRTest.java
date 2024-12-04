@@ -212,7 +212,7 @@ public class MinimalSparkMoRTest extends OpenHouseSparkITest {
   }
 
   protected void createAndInitTable(String schema) {
-    sql("CREATE TABLE openhouse.%s (%s) %s", tableName, schema, "");
+    sql("CREATE TABLE openhouse.%s (%s) USING iceberg %s", tableName, schema, "");
     initTable();
   }
 
