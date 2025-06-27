@@ -5,6 +5,7 @@ import org.springframework.boot.actuate.autoconfigure.security.servlet.Managemen
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.autoconfigure.domain.EntityScan;
+import org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration;
 import org.springframework.boot.autoconfigure.security.servlet.SecurityAutoConfiguration;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
 
@@ -28,7 +29,11 @@ import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
       "com.linkedin.openhouse.tables.toggle.model"
     })
 @EnableAutoConfiguration(
-    exclude = {SecurityAutoConfiguration.class, ManagementWebSecurityAutoConfiguration.class})
+    exclude = {
+      SecurityAutoConfiguration.class,
+      ManagementWebSecurityAutoConfiguration.class,
+      HibernateJpaAutoConfiguration.class
+    })
 @EnableJpaRepositories(
     basePackages = {
       "com.linkedin.openhouse.internal.catalog.repository",
