@@ -8,7 +8,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import org.springframework.context.annotation.Primary;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
@@ -17,11 +16,9 @@ import org.springframework.stereotype.Repository;
 
 /**
  * The {@link org.springframework.context.annotation.Bean} injected into /tables e2e tests when
- * communication to the implementation of {@link HouseTableRepository} is not needed. With {@link
- * Primary} annotation, this repository will be the default injection.
+ * communication to the implementation of {@link HouseTableRepository} is not needed.
  */
 @Repository
-@Primary
 public interface HouseTablesH2Repository extends HouseTableRepository {
 
   Map<SoftDeletedTablePrimaryKey, HouseTable> softDeletedTables = new HashMap<>();

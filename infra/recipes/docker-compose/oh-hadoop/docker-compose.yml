@@ -13,6 +13,25 @@ services:
       - datanode
       - prometheus
       - opa
+    profiles:
+      - default
+
+  openhouse-tables-override:
+    container_name: local.openhouse-tables-override
+    extends:
+      file: ../common/oh-services.yml
+      service: openhouse-tables
+    image: oh-hadoop-openhouse-tables-override:latest
+    volumes:
+      - ./:/var/config/
+    depends_on:
+      - openhouse-housetables
+      - namenode
+      - datanode
+      - prometheus
+      - opa
+    profiles:
+      - override
 
   openhouse-housetables:
     container_name: local.openhouse-housetables

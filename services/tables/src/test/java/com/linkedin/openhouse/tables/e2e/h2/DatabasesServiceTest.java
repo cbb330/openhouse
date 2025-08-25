@@ -10,10 +10,12 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.test.context.ContextConfiguration;
 
 @SpringBootTest(classes = SpringH2Application.class)
 @ContextConfiguration(initializers = PropertyOverrideContextInitializer.class)
+@Import(H2RepositoryTestConfiguration.class)
 public class DatabasesServiceTest {
 
   @Autowired DatabasesService databasesService;

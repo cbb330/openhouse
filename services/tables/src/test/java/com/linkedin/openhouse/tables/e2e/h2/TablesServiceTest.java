@@ -40,6 +40,7 @@ import org.mockito.Mockito;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.context.annotation.Import;
 import org.springframework.data.domain.Page;
 import org.springframework.data.util.Pair;
 import org.springframework.security.access.AccessDeniedException;
@@ -47,6 +48,7 @@ import org.springframework.test.context.ContextConfiguration;
 
 @SpringBootTest(classes = SpringH2Application.class)
 @ContextConfiguration(initializers = PropertyOverrideContextInitializer.class)
+@Import(H2RepositoryTestConfiguration.class)
 public class TablesServiceTest {
 
   @Autowired TablesService tablesService;
