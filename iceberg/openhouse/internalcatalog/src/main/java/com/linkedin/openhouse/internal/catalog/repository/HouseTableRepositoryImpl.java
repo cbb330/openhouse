@@ -17,6 +17,7 @@ import com.linkedin.openhouse.internal.catalog.repository.exception.HouseTableCa
 import com.linkedin.openhouse.internal.catalog.repository.exception.HouseTableConcurrentUpdateException;
 import com.linkedin.openhouse.internal.catalog.repository.exception.HouseTableNotFoundException;
 import com.linkedin.openhouse.internal.catalog.repository.exception.HouseTableRepositoryStateUnknownException;
+import com.linkedin.openhouse.internal.catalog.utils.RetryUtils;
 import io.netty.resolver.dns.DnsNameResolverTimeoutException;
 import java.time.Duration;
 import java.util.Arrays;
@@ -84,8 +85,8 @@ public class HouseTableRepositoryImpl implements HouseTableRepository {
       // hence retry is added for IllegalStateException
       retryTemplate =
           builder
-              .maxAttempts(HtsRetryUtils.MAX_RETRY_ATTEMPT)
-              .customBackoff(HtsRetryUtils.DEFAULT_HTS_BACKOFF_POLICY)
+              .maxAttempts(RetryUtils.MAX_RETRY_ATTEMPT)
+              .customBackoff(RetryUtils.DEFAULT_HTS_BACKOFF_POLICY)
               .retryOn(throwables)
               .build();
     }

@@ -18,6 +18,7 @@ import com.linkedin.openhouse.internal.catalog.repository.exception.HouseTableCa
 import com.linkedin.openhouse.internal.catalog.repository.exception.HouseTableConcurrentUpdateException;
 import com.linkedin.openhouse.internal.catalog.repository.exception.HouseTableNotFoundException;
 import com.linkedin.openhouse.internal.catalog.repository.exception.HouseTableRepositoryStateUnknownException;
+import com.linkedin.openhouse.internal.catalog.utils.RetryUtils;
 import io.netty.handler.codec.dns.DefaultDnsQuestion;
 import io.netty.handler.codec.dns.DnsRecordType;
 import io.netty.resolver.dns.DnsNameResolverTimeoutException;
@@ -561,7 +562,7 @@ public class HouseTableRepositoryImplTest {
   public void testRetryForFindByIdHtsCall() {
     // Injecting a Gateway timeout and an internal server error, will be translated to retryable
     // error. In fact only 500, 502, 503, 504 are retryable based on
-    // com.linkedin.openhouse.internal.catalog.repository.HtsRetryUtils.getHtsRetryTemplate AND
+    // com.linkedin.openhouse.internal.catalog.utils.RetryUtils.getHtsRetryTemplate AND
     // com.linkedin.openhouse.internal.catalog.repository.HouseTableRepositoryImpl.handleHtsHttpError
     // All of them are covered in the following two tests.
     // Then inject a non retryable error(409) which should terminate the retry attempt and exception
@@ -598,7 +599,7 @@ public class HouseTableRepositoryImplTest {
     Assertions.assertThrows(
         HouseTableConcurrentUpdateException.class, () -> htsRepo.findById(testKey));
     int actualRetryCount = retryListener.getRetryCount();
-    Assertions.assertEquals(actualRetryCount, HtsRetryUtils.MAX_RETRY_ATTEMPT);
+    Assertions.assertEquals(actualRetryCount, RetryUtils.MAX_RETRY_ATTEMPT);
   }
 
   @Test

@@ -20,6 +20,7 @@ import com.linkedin.openhouse.internal.catalog.repository.exception.HouseTableCa
 import com.linkedin.openhouse.internal.catalog.repository.exception.HouseTableConcurrentUpdateException;
 import com.linkedin.openhouse.internal.catalog.repository.exception.HouseTableNotFoundException;
 import com.linkedin.openhouse.internal.catalog.utils.MetadataUpdateUtils;
+import com.linkedin.openhouse.internal.catalog.utils.RetryUtils;
 import java.io.IOException;
 import java.time.Clock;
 import java.time.Instant;
@@ -114,27 +115,22 @@ public class OpenHouseInternalTableOperations extends BaseMetastoreTableOperatio
 
   /** A wrapper function to encapsulate timer logic for loading metadata. */
   protected void refreshMetadata(final String metadataLoc) {
-    long startTime = System.currentTimeMillis();
     boolean needToReload = !Objects.equal(currentMetadataLocation(), metadataLoc);
-    Runnable r = () -> super.refreshFromMetadataLocation(metadataLoc);
-    try {
-      if (needToReload) {
-        metricsReporter.executeWithStats(
-            r, InternalCatalogMetricsConstant.METADATA_RETRIEVAL_LATENCY, getCatalogMetricTags());
-      } else {
-        r.run();
-      }
-      log.info(
-          "refreshMetadata from location {} succeeded, took {} ms",
-          metadataLoc,
-          System.currentTimeMillis() - startTime);
-    } catch (Exception e) {
-      log.error(
-          "refreshMetadata from location {} failed after {} ms",
-          metadataLoc,
-          System.currentTimeMillis() - startTime,
-          e);
-      throw e;
+    Runnable r =
+        () ->
+            RetryUtils.getRefreshMetadataRetryTemplate()
+                .execute(
+                    context -> {
+                      context.setAttribute("location", metadataLoc);
+                      super.refreshFromMetadataLocation(metadataLoc);
+                      return null;
+                    });
+
+    if (needToReload) {
+      metricsReporter.executeWithStats(
+          r, InternalCatalogMetricsConstant.METADATA_RETRIEVAL_LATENCY, getCatalogMetricTags());
+    } else {
+      r.run();
     }
   }
 
@@ -265,26 +261,18 @@ public class OpenHouseInternalTableOperations extends BaseMetastoreTableOperatio
       }
 
       final TableMetadata updatedMtDataRef = updatedMetadata;
-      long metadataUpdateStartTime = System.currentTimeMillis();
-      try {
-        metricsReporter.executeWithStats(
-            () ->
-                TableMetadataParser.write(
-                    updatedMtDataRef, io().newOutputFile(newMetadataLocation)),
-            InternalCatalogMetricsConstant.METADATA_UPDATE_LATENCY,
-            getCatalogMetricTags());
-        log.info(
-            "updateMetadata to location {} succeeded, took {} ms",
-            newMetadataLocation,
-            System.currentTimeMillis() - metadataUpdateStartTime);
-      } catch (Exception e) {
-        log.error(
-            "updateMetadata to location {} failed after {} ms",
-            newMetadataLocation,
-            System.currentTimeMillis() - metadataUpdateStartTime,
-            e);
-        throw e;
-      }
+      metricsReporter.executeWithStats(
+          () ->
+              RetryUtils.getUpdateMetadataRetryTemplate()
+                  .execute(
+                      context -> {
+                        context.setAttribute("location", newMetadataLocation);
+                        TableMetadataParser.write(
+                            updatedMtDataRef, io().newOutputFile(newMetadataLocation));
+                        return null;
+                      }),
+          InternalCatalogMetricsConstant.METADATA_UPDATE_LATENCY,
+          getCatalogMetricTags());
 
       houseTable = houseTableMapper.toHouseTable(updatedMetadata, fileIO);
       if (base != null
