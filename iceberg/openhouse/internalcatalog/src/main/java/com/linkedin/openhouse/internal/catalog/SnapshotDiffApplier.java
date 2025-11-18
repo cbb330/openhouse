@@ -635,38 +635,29 @@ public class SnapshotDiffApplier {
                   CatalogConstants.SNAPSHOTS_JSON_KEY, CatalogConstants.SNAPSHOTS_REFS_KEY)));
 
       // Then set the tracking properties
-      String appendedKey = getCanonicalFieldName(CatalogConstants.APPENDED_SNAPSHOTS);
       if (!this.mainBranchSnapshotsForMetrics.isEmpty()) {
         builder.setProperties(
             Collections.singletonMap(
-                appendedKey, formatSnapshotIds(this.mainBranchSnapshotsForMetrics)));
-      } else {
-        builder.removeProperties(Collections.singleton(appendedKey));
+                getCanonicalFieldName(CatalogConstants.APPENDED_SNAPSHOTS),
+                formatSnapshotIds(this.mainBranchSnapshotsForMetrics)));
       }
-
-      String stagedKey = getCanonicalFieldName(CatalogConstants.STAGED_SNAPSHOTS);
       if (!this.newStagedSnapshots.isEmpty()) {
         builder.setProperties(
-            Collections.singletonMap(stagedKey, formatSnapshotIds(this.newStagedSnapshots)));
-      } else {
-        builder.removeProperties(Collections.singleton(stagedKey));
+            Collections.singletonMap(
+                getCanonicalFieldName(CatalogConstants.STAGED_SNAPSHOTS),
+                formatSnapshotIds(this.newStagedSnapshots)));
       }
-
-      String cherryPickedKey = getCanonicalFieldName(CatalogConstants.CHERRY_PICKED_SNAPSHOTS);
       if (!this.cherryPickedSnapshots.isEmpty()) {
         builder.setProperties(
             Collections.singletonMap(
-                cherryPickedKey, formatSnapshotIds(this.cherryPickedSnapshots)));
-      } else {
-        builder.removeProperties(Collections.singleton(cherryPickedKey));
+                getCanonicalFieldName(CatalogConstants.CHERRY_PICKED_SNAPSHOTS),
+                formatSnapshotIds(this.cherryPickedSnapshots)));
       }
-
-      String deletedKey = getCanonicalFieldName(CatalogConstants.DELETED_SNAPSHOTS);
       if (!this.deletedSnapshots.isEmpty()) {
         builder.setProperties(
-            Collections.singletonMap(deletedKey, formatSnapshotIds(this.deletedSnapshots)));
-      } else {
-        builder.removeProperties(Collections.singleton(deletedKey));
+            Collections.singletonMap(
+                getCanonicalFieldName(CatalogConstants.DELETED_SNAPSHOTS),
+                formatSnapshotIds(this.deletedSnapshots)));
       }
     }
 
