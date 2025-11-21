@@ -173,12 +173,14 @@ public class SnapshotDiffApplier {
       Set<Long> cherryPickedIds =
           cherryPickedSnapshots.stream().map(Snapshot::snapshotId).collect(Collectors.toSet());
 
-      List<Snapshot> newStagedSnapshots =
+      // Compute WAP snapshots (those with explicit wap.id property)
+      List<Snapshot> wapSnapshots =
           computeWapSnapshots(
               providedSnapshots, cherryPickedIds, existingBranchRefIds, providedBranchRefIds);
       Set<Long> wapIds =
-          newStagedSnapshots.stream().map(Snapshot::snapshotId).collect(Collectors.toSet());
+          wapSnapshots.stream().map(Snapshot::snapshotId).collect(Collectors.toSet());
 
+      // Regular snapshots are everything except cherry-picked and WAP
       List<Snapshot> regularSnapshots =
           computeRegularSnapshots(providedSnapshots, cherryPickedIds, wapIds);
 
@@ -233,13 +235,28 @@ public class SnapshotDiffApplier {
                           && !snapshotsInBranchLineages.contains(s.snapshotId()))
               .collect(Collectors.toList());
 
+      // Staged snapshots = unreferenced new snapshots that are not cherry-picked or WAP
+      // These are snapshots created with .stageOnly() without explicit wap.id
+      List<Snapshot> stagedSnapshots =
+          unreferencedNewSnapshots.stream()
+              .filter(s -> !cherryPickedIds.contains(s.snapshotId()))
+              .filter(s -> !wapIds.contains(s.snapshotId()))
+              .collect(Collectors.toList());
+
+      // Combine WAP and staged snapshots for tracking purposes
+      List<Snapshot> newStagedSnapshots = new ArrayList<>();
+      newStagedSnapshots.addAll(wapSnapshots);
+      newStagedSnapshots.addAll(stagedSnapshots);
+      Set<Long> allStagedIds =
+          newStagedSnapshots.stream().map(Snapshot::snapshotId).collect(Collectors.toSet());
+
       // Compute auto-appended snapshots for MAIN branch (backward compatibility)
       final List<Snapshot> autoAppendedToMainSnapshots;
       if (!providedRefs.containsKey(SnapshotRef.MAIN_BRANCH)
           && !unreferencedNewSnapshots.isEmpty()) {
         autoAppendedToMainSnapshots =
             unreferencedNewSnapshots.stream()
-                .filter(s -> !wapIds.contains(s.snapshotId()))
+                .filter(s -> !allStagedIds.contains(s.snapshotId()))
                 .collect(Collectors.toList());
       } else {
         autoAppendedToMainSnapshots = Collections.emptyList();
@@ -258,6 +275,7 @@ public class SnapshotDiffApplier {
           .flatMap(List::stream)
           .map(Snapshot::snapshotId)
           .forEach(snapshotIdsToAdd::add);
+      newStagedSnapshots.stream().map(Snapshot::snapshotId).forEach(snapshotIdsToAdd::add);
       // Remove any that already exist and aren't deleted
       snapshotIdsToAdd.removeIf(id -> metadataSnapshotIds.contains(id) && !deletedIds.contains(id));
 
@@ -324,15 +342,15 @@ public class SnapshotDiffApplier {
     }
 
     /**
-     * Computes staged WAP snapshots that are not yet published to any branch.
+     * Computes WAP snapshots that have explicit wap.id property.
      *
-     * <p>Depends on: cherry-picked IDs (to exclude WAP snapshots being published)
+     * <p>These are snapshots created with explicit WAP workflow (e.g., Spark's wap.id config).
      *
      * @param providedSnapshots All snapshots provided in the update
      * @param excludeCherryPicked Set of cherry-picked snapshot IDs to exclude
      * @param existingBranchRefIds Set of snapshot IDs referenced by existing branches
      * @param providedBranchRefIds Set of snapshot IDs referenced by provided branches
-     * @return List of staged WAP snapshots
+     * @return List of WAP snapshots with wap.id property
      */
     private static List<Snapshot> computeWapSnapshots(
         List<Snapshot> providedSnapshots,
@@ -344,6 +362,7 @@ public class SnapshotDiffApplier {
                   existingBranchRefIds.stream(), providedBranchRefIds.stream())
               .collect(Collectors.toSet());
 
+      // WAP snapshots are identified by the presence of wap.id property
       return providedSnapshots.stream()
           .filter(s -> !excludeCherryPicked.contains(s.snapshotId()))
           .filter(
@@ -572,32 +591,62 @@ public class SnapshotDiffApplier {
       }
       this.staleRefs.forEach(builder::removeRef);
 
-      // [2] Add unreferenced snapshots (auto-append to MAIN for backward compat, then WAP)
-      this.autoAppendedToMainSnapshots.forEach(
-          s -> builder.setBranchSnapshot(s, SnapshotRef.MAIN_BRANCH));
-      this.unreferencedNewSnapshots.stream()
-          .filter(
-              s ->
-                  s.summary() != null
-                      && s.summary().containsKey(SnapshotSummary.STAGED_WAP_ID_PROP))
-          .forEach(builder::addSnapshot);
+      // [2] Prepare snapshot actions: Map snapshot ID -> List of branches to set
+      Map<Long, List<String>> branchesToSet = new HashMap<>();
 
-      // [3] Apply branch operations (using pre-computed deduplication set)
-      // First, apply new snapshots for branches that have them
+      // a) From explicit branch updates
       this.newSnapshotsByBranch.forEach(
-          (branchName, branchSnapshots) -> {
-            // Add each new snapshot in lineage order
-            for (Snapshot snapshot : branchSnapshots) {
-              if (this.snapshotIdsToAdd.contains(snapshot.snapshotId())) {
-                builder.setBranchSnapshot(snapshot, branchName);
-              }
-            }
-          });
+          (branch, snapshots) ->
+              snapshots.forEach(
+                  s ->
+                      branchesToSet
+                          .computeIfAbsent(s.snapshotId(), k -> new ArrayList<>())
+                          .add(branch)));
 
-      // Then, set refs for all provided refs (branches without new snapshots, and tags)
+      // b) From auto-append (backward compatibility)
+      this.autoAppendedToMainSnapshots.forEach(
+          s ->
+              branchesToSet
+                  .computeIfAbsent(s.snapshotId(), k -> new ArrayList<>())
+                  .add(SnapshotRef.MAIN_BRANCH));
+
+      // [3] Collect all snapshots to add (staged + branch + auto-append)
+      List<Snapshot> allSnapshotsToAdd = new ArrayList<>();
+
+      // Add staged/WAP snapshots
+      this.newStagedSnapshots.stream()
+          .filter(s -> this.snapshotIdsToAdd.contains(s.snapshotId()))
+          .forEach(allSnapshotsToAdd::add);
+
+      // Add branch/lineage snapshots
+      this.newSnapshotsByBranch.values().stream()
+          .flatMap(List::stream)
+          .filter(s -> this.snapshotIdsToAdd.contains(s.snapshotId()))
+          .forEach(allSnapshotsToAdd::add);
+
+      // Add auto-appended snapshots
+      this.autoAppendedToMainSnapshots.forEach(allSnapshotsToAdd::add);
+
+      // [4] Apply snapshots sorted by sequence number to satisfy Iceberg validation
+      allSnapshotsToAdd.stream()
+          .distinct() // Deduplicate as a snapshot can be in multiple lists/branches
+          .sorted(java.util.Comparator.comparingLong(Snapshot::sequenceNumber))
+          .forEach(
+              snapshot -> {
+                List<String> branches = branchesToSet.get(snapshot.snapshotId());
+                if (branches != null && !branches.isEmpty()) {
+                  // Referenced by one or more branches (this adds the snapshot too)
+                  branches.forEach(branch -> builder.setBranchSnapshot(snapshot, branch));
+                } else {
+                  // Staged (unreferenced)
+                  builder.addSnapshot(snapshot);
+                }
+              });
+
+      // [5] Set refs for non-new snapshots (tags, fast-forwards)
       this.providedRefs.forEach(
           (refName, ref) -> {
-            // Skip if we already added snapshots for this branch
+            // Skip if handled above (has new snapshots)
             if (this.newSnapshotsByBranch.containsKey(refName)
                 && !this.newSnapshotsByBranch.get(refName).isEmpty()) {
               return;
@@ -613,7 +662,7 @@ public class SnapshotDiffApplier {
             builder.setRef(refName, ref);
           });
 
-      // [4] Set properties
+      // [6] Set properties
       setSnapshotProperties(builder);
 
       return builder.build();

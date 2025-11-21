@@ -969,48 +969,51 @@ public class SnapshotDiffApplierTest {
   }
 
   /**
-   * Verifies adding regular (non-WAP) snapshots with empty refs. historically, such snapshots were
-   * automatically added to MAIN branch and tracked as APPENDED_SNAPSHOTS. This test validates
-   * backward compatibility with that behavior. NOTE: The semantics here are questionable -
-   * snapshots with no refs should arguably not be "appended" to MAIN, but this preserves the
-   * original behavior.
+   * Verifies adding snapshots with empty refs. With the updated semantics, unreferenced snapshots
+   * are now treated as staged (WAP) snapshots, aligning with Iceberg's .stageOnly() behavior.
+   * This replaces the old "auto-append to MAIN" backward compatibility behavior.
    */
   @Test
-  void testApplySnapshots_regularSnapshotsWithEmptyRefs_autoAppendedToMain() throws IOException {
+  void testApplySnapshots_unreferencedSnapshots_treatedAsStaged() throws IOException {
     List<Snapshot> baseSnapshots = IcebergTestUtil.getSnapshots();
     TableMetadata baseWithSnapshots = addSnapshotsToMetadata(baseMetadata, baseSnapshots);
 
-    // Provided: existing + new snapshots, but empty refs map (no MAIN branch)
+    // Provided: existing + new snapshots, with MAIN branch unchanged
     List<Snapshot> extraSnapshots = IcebergTestUtil.getExtraLinearSnapshots();
     List<Snapshot> allSnapshots = new ArrayList<>(baseSnapshots);
     allSnapshots.addAll(extraSnapshots);
 
-    // Empty refs - no MAIN branch
-    TableMetadata newMetadata =
-        createMetadataWithSnapshots(baseWithSnapshots, allSnapshots, new HashMap<>());
+    // Keep MAIN branch pointing to the same snapshot (no branch update)
+    Map<String, String> refs =
+        IcebergTestUtil.createMainBranchRefPointingTo(
+            baseSnapshots.get(baseSnapshots.size() - 1));
+    TableMetadata newMetadata = createMetadataWithSnapshots(baseWithSnapshots, allSnapshots, refs);
 
     TableMetadata result = snapshotDiffApplier.applySnapshots(baseWithSnapshots, newMetadata);
 
     // Verify new snapshots added
     assertEquals(allSnapshots.size(), result.snapshots().size());
 
-    // Verify MAIN branch points to the latest snapshot (auto-appended to main)
+    // Verify MAIN branch is unchanged (unreferenced snapshots are now staged, not auto-appended)
     assertNotNull(result.ref(SnapshotRef.MAIN_BRANCH));
     assertEquals(
-        allSnapshots.get(allSnapshots.size() - 1).snapshotId(),
+        baseSnapshots.get(baseSnapshots.size() - 1).snapshotId(),
         result.ref(SnapshotRef.MAIN_BRANCH).snapshotId());
 
-    // Verify new snapshots tracked as appended (even though unreferenced, they're not staged WAP)
+    // Verify new snapshots tracked as staged (not appended)
     Map<String, String> resultProps = result.properties();
-    String appendedSnapshotsStr =
-        resultProps.get(getCanonicalFieldName(CatalogConstants.APPENDED_SNAPSHOTS));
+    String stagedSnapshotsStr =
+        resultProps.get(getCanonicalFieldName(CatalogConstants.STAGED_SNAPSHOTS));
 
-    assertNotNull(appendedSnapshotsStr);
+    assertNotNull(stagedSnapshotsStr);
     for (Snapshot extraSnapshot : extraSnapshots) {
       assertTrue(
-          appendedSnapshotsStr.contains(Long.toString(extraSnapshot.snapshotId())),
-          "Snapshot " + extraSnapshot.snapshotId() + " should be tracked as appended");
+          stagedSnapshotsStr.contains(Long.toString(extraSnapshot.snapshotId())),
+          "Snapshot " + extraSnapshot.snapshotId() + " should be tracked as staged");
     }
+
+    // Verify no appended snapshots
+    assertNull(resultProps.get(getCanonicalFieldName(CatalogConstants.APPENDED_SNAPSHOTS)));
   }
 
   /**

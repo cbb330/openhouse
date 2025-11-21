@@ -276,6 +276,10 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
 
   @Override
   public TableOperations newTableOps(TableIdentifier tableIdentifier) {
+    if (tableIdentifier.namespace().levels().length > 1) {
+      throw new NoSuchTableException(
+          "OpenHouse catalog does not support multi-level namespaces: %s", tableIdentifier);
+    }
     return OpenHouseTableOperations.builder()
         .tableIdentifier(tableIdentifier)
         .fileIO(fileIO)
@@ -298,6 +302,19 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
   @Override
   protected String defaultWarehouseLocation(TableIdentifier tableIdentifier) {
     return null;
+  }
+
+  @Override
+  public org.apache.iceberg.Table createTable(
+      TableIdentifier ident,
+      org.apache.iceberg.Schema schema,
+      PartitionSpec spec,
+      Map<String, String> properties) {
+    System.out.println(
+        String.format(
+            "TRACE OpenHouseCatalog#createTable identifier=%s namespace=%s propsKeys=%s",
+            ident, ident.namespace(), properties == null ? "null" : properties.keySet()));
+    return super.createTable(ident, schema, spec, properties);
   }
 
   /**

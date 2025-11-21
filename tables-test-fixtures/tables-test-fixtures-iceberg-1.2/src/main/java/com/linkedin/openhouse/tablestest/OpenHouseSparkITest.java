@@ -12,7 +12,7 @@ import org.apache.spark.sql.SparkSession;
  * <p>See com.linkedin.openhouse.jobs.spark.TestSparkApp as an example.
  */
 public class OpenHouseSparkITest {
-  private static final String LOCALHOST = "http://localhost:";
+  private static final String LOCALHOST = "http://127.0.0.1:";
   private static final String LOCAL_FS = "file:///";
 
   /** Use a singleton {@link OpenHouseLocalServer} that will shutdown when the JVM exits. */
