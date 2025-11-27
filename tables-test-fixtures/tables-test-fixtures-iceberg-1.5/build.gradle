@@ -9,6 +9,7 @@ import com.github.jengelman.gradle.plugins.shadow.transformers.PropertiesFileTra
 
 ext {
   sparkVersion = '3.5.2'
+  icebergVersion = '1.5.2'
 }
 
 configurations {
@@ -54,6 +55,14 @@ dependencies {
     // These classes are available from `client-codegen-convention.gradle`
     exclude group: "io.netty"
   }
+  // HiveConf is needed for TestSparkSessionProvider interface
+  compileOnly('org.apache.spark:spark-hive_2.12:' + sparkVersion) {
+    exclude group: 'org.apache.avro', module: 'avro'
+    exclude group: 'org.apache.arrow'
+    exclude group: 'org.apache.parquet'
+    exclude group: 'io.netty'
+    exclude group: 'org.roaringbitmap'
+  }
 
   implementation 'org.springframework.boot:spring-boot-starter-webflux:' + spring_web_version
   implementation ('org.springframework.boot:spring-boot-starter-data-jpa:' + spring_web_version) {
@@ -64,6 +73,8 @@ dependencies {
   implementation ('org.springframework.boot:spring-boot-starter-actuator:2.7.8') {
     exclude(group: 'io.micrometer', module: 'micrometer-core')
   }
+  // micrometer-core is needed for SpringH2TestApplication's MeterRegistry bean
+  implementation 'io.micrometer:micrometer-core:1.9.17'
   implementation group: 'com.zaxxer', name: 'HikariCP', version: '4.0.3'
   compileOnly('org.projectlombok:lombok:' + '1.18.20')
   implementation (project(':cluster:storage')) {
@@ -81,24 +92,40 @@ dependencies {
     exclude group: 'com.h2database'
     exclude group: 'io.micrometer'
   }
+  // Use shadow jars from runtime modules to include their transitive dependencies
+  shadow (project(path: ':integrations:java:iceberg-1.2:openhouse-java-runtime', configuration: 'shadow')) {
+    exclude group: 'org.apache.iceberg'
+  }
+  shadow (project(path: ':integrations:spark:spark-3.5:openhouse-spark-3.5-runtime_2.12', configuration: 'shadow')) {
+    exclude group: 'org.apache.iceberg'
+    exclude group: 'org.apache.spark'
+  }
 
   testImplementation('org.apache.hadoop:hadoop-common:3.2.0'){
     transitive = false
     exclude group: "io.netty"
   }
+  // OpenHouseTestTableProvider needs Hadoop Configuration
+  compileOnly 'org.apache.hadoop:hadoop-common:3.2.0'
   testRuntimeOnly("org.eclipse.jetty:jetty-server:11.0.2")
 }
 
 shadowJar {
   zip64  true
+  duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
   archiveClassifier.set('uber')
+
+  // Include shadow configuration dependencies - shadow first to prefer relocated classes
+  configurations = [project.configurations.shadow, project.configurations.runtimeClasspath]
 
   mergeServiceFiles()
 
   append 'META-INF/spring.handlers'
   append 'META-INF/spring.schemas'
   append 'META-INF/spring.tooling'
+  // Merge Spring Boot 2.7+ auto-configuration imports
+  append 'META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports'
   transform(PropertiesFileTransformer) {
     paths = ['META-INF/spring.factories' ]
     mergeStrategy = "merge"
@@ -132,9 +159,10 @@ shadowJar {
     relocate ('org.yaml.snakeyaml', 'openhouse.relocated.org.yaml.snakeyaml')
     relocate ('org.json', 'openhouse.relocated.org.json')
     relocate('org.openapitools', 'openhouse.relocated.org.openapitools')
-    relocate ('org.apache.iceberg', 'openhouse.relocated.org.apache.iceberg') {
-      exclude 'org.apache.iceberg.spark.SparkCatalog'
-    }
+    // Do NOT relocate Iceberg classes - they must remain compatible with Iceberg's own classes
+    // on the test classpath. OpenHouseCatalog implements org.apache.iceberg.catalog.Catalog,
+    // and if we relocate Iceberg, the interface won't match.
+    // relocate ('org.apache.iceberg', 'openhouse.relocated.org.apache.iceberg')
 
 
 
@@ -232,6 +260,8 @@ shadowJar {
   exclude '**/*.ico'
   exclude '**/*.dylib'
   exclude '**/**/*.so'
+  // Exclude HikariCP micrometer integration to avoid version conflicts
+  exclude 'com/zaxxer/hikari/metrics/micrometer/**'
 }
 
 // https://github.com/johnrengelman/shadow/issues/335

@@ -66,6 +66,10 @@ dependencies {
   implementation (project(':integrations:java:iceberg-1.2:openhouse-java-runtime')) {
     exclude group: 'org.apache.iceberg'
   }
+  implementation (project(path: ':integrations:spark:spark-3.1:openhouse-spark-runtime_2.12', configuration: 'shadow')) {
+    exclude group: 'org.apache.iceberg'
+    exclude group: 'org.apache.spark'
+  }
   implementation (project(':client:tableclient')) {
     exclude group: 'io.netty'
     exclude group: 'org.apache.hadoop'
@@ -94,6 +98,8 @@ dependencies {
     exclude group: 'org.ow2.asm'
     exclude group: 'javax'
   }
+  implementation project(':services:common')
+  implementation files(project(':services:common').sourceSets.main.output)
   testImplementation('org.apache.hadoop:hadoop-common:3.2.0'){
     transitive = false
     exclude group: "io.netty"
@@ -103,6 +109,7 @@ dependencies {
 
 shadowJar {
   zip64  true
+  duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
   archiveClassifier.set('uber')
 

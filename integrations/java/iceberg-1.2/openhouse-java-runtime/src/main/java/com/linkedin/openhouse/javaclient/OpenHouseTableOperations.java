@@ -79,8 +79,6 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
   public void doRefresh() {
     validateNamespace("doRefresh");
     log.info("Calling doRefresh for table: {}", tableName());
-    System.out.println(
-        String.format("TRACE doRefresh table=%s namespace=%s", tableName(), tableIdentifier.namespace()));
     Optional<String> tableLocation =
         tableApi
             .getTableV1(tableIdentifier.namespace().toString(), tableIdentifier.name())
@@ -98,7 +96,10 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
             .onErrorResume(
                 WebClientResponseException.BadRequest.class,
                 e -> {
-                  log.warn("BadRequest during refresh for table {}: {}", tableName(), e.getResponseBodyAsString());
+                  log.warn(
+                      "BadRequest during refresh for table {}: {}",
+                      tableName(),
+                      e.getResponseBodyAsString());
                   return Mono.empty();
                 })
             .onErrorResume(
@@ -123,10 +124,6 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
         tableName(),
         base == null,
         metadata == null ? "null" : metadata.metadataFileLocation());
-    System.out.println(
-        String.format(
-            "TRACE doCommit table=%s baseNull=%s metadataLoc=%s",
-            tableName(), base == null, metadata == null ? "null" : metadata.metadataFileLocation()));
     boolean metadataUpdated = isMetadataUpdated(base, metadata);
     try {
       if (areSnapshotsUpdated(base, metadata)) {
@@ -172,10 +169,6 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
         tableName(),
         base == null,
         metadata.metadataFileLocation());
-    System.out.println(
-        String.format(
-          "TRACE createUpdateTable table=%s baseNull=%s metadataLoc=%s",
-          tableName(), base == null, metadata.metadataFileLocation()));
     CreateUpdateTableRequestBody createUpdateTableRequestBody =
         constructMetadataRequestBody(base, metadata);
 
@@ -341,12 +334,6 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
         tableName(),
         base == null,
         newMetadata.snapshots() == null ? 0 : newMetadata.snapshots().size());
-    System.out.println(
-        String.format(
-            "TRACE putSnapshots table=%s baseNull=%s snapshotCount=%s",
-            tableName(),
-            base == null,
-            newMetadata.snapshots() == null ? 0 : newMetadata.snapshots().size()));
     IcebergSnapshotsRequestBody icebergSnapshotsRequestBody = new IcebergSnapshotsRequestBody();
     CreateUpdateTableRequestBody createUpdateTableRequestBody =
         constructMetadataRequestBody(base, newMetadata);
@@ -429,10 +416,6 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
           context,
           tableIdentifier,
           tableIdentifier.namespace());
-      System.out.println(
-          String.format(
-              "TRACE validateNamespace reject context=%s table=%s namespace=%s",
-              context, tableIdentifier, tableIdentifier.namespace()));
       throw new NoSuchTableException(
           "OpenHouse catalog does not support multi-level namespaces: %s", tableIdentifier);
     }

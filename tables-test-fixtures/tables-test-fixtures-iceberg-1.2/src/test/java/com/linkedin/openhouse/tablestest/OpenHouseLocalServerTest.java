@@ -2,7 +2,6 @@ package com.linkedin.openhouse.tablestest;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-import org.springframework.util.SocketUtils;
 
 public class OpenHouseLocalServerTest {
 
@@ -18,7 +17,7 @@ public class OpenHouseLocalServerTest {
   public void testServerStartCustomPortNo() {
     // Use a specific high port range to avoid conflicts with other test infrastructure
     // Try multiple ports in case the first one is occupied
-    int portNo = SocketUtils.findAvailableTcpPort(59000, 59100);
+    int portNo = org.springframework.test.util.TestSocketUtils.findAvailableTcpPort();
     OpenHouseLocalServer openHouseLocalServer = new OpenHouseLocalServer(portNo);
     Assertions.assertDoesNotThrow(() -> openHouseLocalServer.start());
     Assertions.assertEquals(openHouseLocalServer.getPort(), portNo);

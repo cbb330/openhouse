@@ -56,6 +56,9 @@ task statementTest(type: Test) {
   filter {
     includeTestsMatching 'com.linkedin.openhouse.spark.statementtest.*'
   }
+  // Run tests sequentially to avoid SparkSession port conflicts
+  maxParallelForks = 1
+  forkEvery = 1  // Fork a new JVM for each test class to ensure clean SparkSession
   jvmArgs \
       '--add-exports=java.base/sun.nio.ch=ALL-UNNAMED'
 }

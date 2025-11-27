@@ -1,5 +1,6 @@
 buildscript {
   repositories {
+    mavenLocal()
     maven {
       url "https://repo.maven.apache.org/maven2/"
       metadataSources {
@@ -34,6 +35,7 @@ ext {
 }
 
 group = 'com.linkedin.openhouse'
+version = '0.0.6-SNAPSHOT'
 
 subprojects {
   buildDir = "${rootProject.buildDir}/${project.name}"
@@ -48,6 +50,7 @@ allprojects {
   group = 'com.linkedin.openhouse'
 
   repositories {
+    mavenLocal()
     maven {
       url "https://repo.maven.apache.org/maven2/"
       metadataSources {

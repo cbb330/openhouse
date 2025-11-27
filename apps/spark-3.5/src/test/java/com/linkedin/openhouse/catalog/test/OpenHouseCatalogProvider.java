@@ -1,11 +1,8 @@
 package com.linkedin.openhouse.catalog.test;
 
 import com.linkedin.openhouse.tablestest.OpenHouseLocalServer;
-import com.linkedin.openhouse.tablestest.TestSparkSessionUtil;
-import java.net.URI;
 import java.util.Map;
 import org.apache.iceberg.spark.TestCatalogProvider;
-import org.apache.spark.sql.SparkSession;
 
 /**
  * Provides OpenHouse catalog configuration to Iceberg's parameterized tests via ServiceLoader SPI.
@@ -49,4 +46,3 @@ public class OpenHouseCatalogProvider implements TestCatalogProvider {
     }
   }
 }
-

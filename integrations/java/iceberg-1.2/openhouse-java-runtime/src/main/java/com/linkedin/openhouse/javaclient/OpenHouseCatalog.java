@@ -310,10 +310,6 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
       org.apache.iceberg.Schema schema,
       PartitionSpec spec,
       Map<String, String> properties) {
-    System.out.println(
-        String.format(
-            "TRACE OpenHouseCatalog#createTable identifier=%s namespace=%s propsKeys=%s",
-            ident, ident.namespace(), properties == null ? "null" : properties.keySet()));
     return super.createTable(ident, schema, spec, properties);
   }
 
@@ -386,7 +382,10 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
   @Override
   public Map<String, String> loadNamespaceMetadata(Namespace namespace)
       throws NoSuchNamespaceException, UnsupportedOperationException {
-    throw new UnsupportedOperationException("Describing database is not supported");
+    if (namespaceExists(namespace)) {
+      return Collections.emptyMap();
+    }
+    throw new NoSuchNamespaceException("Namespace does not exist: " + namespace);
   }
 
   @Override
@@ -409,7 +408,7 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
 
   @Override
   public boolean namespaceExists(Namespace namespace) throws NoSuchNamespaceException {
-    throw new UnsupportedOperationException("Checking if database exists is not supported");
+    return listNamespaces().contains(namespace);
   }
 
   @Override

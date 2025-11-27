@@ -441,11 +441,17 @@ public class SnapshotDiffApplierTest {
     assertTrue(exception.getMessage().contains("Cannot delete the current snapshot"));
   }
 
-  /** Verifies that duplicate snapshot IDs in provided snapshots throw an exception. */
+  /**
+   * Verifies that duplicate snapshot IDs in provided snapshots are handled gracefully
+   * (deduplicated).
+   */
   @Test
-  void testApplySnapshots_duplicateSnapshotIds_throwsException() throws IOException {
+  void testApplySnapshots_duplicateSnapshotIds_deduplicated() throws IOException {
     List<Snapshot> snapshots = IcebergTestUtil.getSnapshots();
-    TableMetadata baseWithSnapshots = addSnapshotsToMetadata(baseMetadata, snapshots);
+    // Use a base with only the first snapshot to avoid "current snapshot deleted" error
+    // when we only provide that one snapshot back
+    List<Snapshot> singleSnapshotList = Collections.singletonList(snapshots.get(0));
+    TableMetadata baseWithSnapshots = addSnapshotsToMetadata(baseMetadata, singleSnapshotList);
 
     // Create a list with duplicate snapshots (same snapshot ID appears twice)
     List<Snapshot> duplicateSnapshots = new ArrayList<>();
@@ -455,10 +461,13 @@ public class SnapshotDiffApplierTest {
     TableMetadata newMetadata =
         createMetadataWithSnapshotsAndMainRef(baseWithSnapshots, duplicateSnapshots);
 
-    // Should throw IllegalStateException due to duplicate keys in toMap collector
-    assertThrows(
-        IllegalStateException.class,
-        () -> snapshotDiffApplier.applySnapshots(baseWithSnapshots, newMetadata));
+    // Should succeed by deduplicating
+    TableMetadata result = snapshotDiffApplier.applySnapshots(baseWithSnapshots, newMetadata);
+
+    assertNotNull(result);
+    // Should only have 1 snapshot (deduplicated)
+    assertEquals(1, result.snapshots().size());
+    assertEquals(snapshots.get(0).snapshotId(), result.snapshots().get(0).snapshotId());
   }
 
   /**
@@ -970,8 +979,8 @@ public class SnapshotDiffApplierTest {
 
   /**
    * Verifies adding snapshots with empty refs. With the updated semantics, unreferenced snapshots
-   * are now treated as staged (WAP) snapshots, aligning with Iceberg's .stageOnly() behavior.
-   * This replaces the old "auto-append to MAIN" backward compatibility behavior.
+   * are now treated as staged (WAP) snapshots, aligning with Iceberg's .stageOnly() behavior. This
+   * replaces the old "auto-append to MAIN" backward compatibility behavior.
    */
   @Test
   void testApplySnapshots_unreferencedSnapshots_treatedAsStaged() throws IOException {
@@ -985,8 +994,7 @@ public class SnapshotDiffApplierTest {
 
     // Keep MAIN branch pointing to the same snapshot (no branch update)
     Map<String, String> refs =
-        IcebergTestUtil.createMainBranchRefPointingTo(
-            baseSnapshots.get(baseSnapshots.size() - 1));
+        IcebergTestUtil.createMainBranchRefPointingTo(baseSnapshots.get(baseSnapshots.size() - 1));
     TableMetadata newMetadata = createMetadataWithSnapshots(baseWithSnapshots, allSnapshots, refs);
 
     TableMetadata result = snapshotDiffApplier.applySnapshots(baseWithSnapshots, newMetadata);

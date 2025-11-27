@@ -1,0 +1,49 @@
+# Tests that are incompatible with OpenHouse catalog
+# These tests have hardcoded catalog parameters that don't respect external providers
+
+# Tests with hardcoded catalog parameters (use SparkCatalogConfig directly)
+org.apache.iceberg.spark.sql.TestCreateTableAsSelect
+org.apache.iceberg.spark.sql.TestFilterPushDown
+org.apache.iceberg.spark.sql.TestNamespaceSQL
+org.apache.iceberg.spark.sql.TestPartitionedWritesAsSelect
+org.apache.iceberg.spark.sql.TestRefreshTable
+org.apache.iceberg.spark.sql.TestSelect
+org.apache.iceberg.spark.sql.TestStoragePartitionedJoins
+org.apache.iceberg.spark.sql.TestTimestampWithoutZone
+
+# Source tests with hardcoded catalog parameters
+org.apache.iceberg.spark.source.TestDataFrameWrites
+org.apache.iceberg.spark.source.TestRuntimeFiltering
+org.apache.iceberg.spark.source.TestSparkReaderDeletes
+org.apache.iceberg.spark.source.TestFilteredScan
+org.apache.iceberg.spark.source.TestPartitionPruning
+org.apache.iceberg.spark.source.TestCompressionSettings
+org.apache.iceberg.spark.source.TestSparkTable
+org.apache.iceberg.spark.source.TestSparkScan
+org.apache.iceberg.spark.source.TestSparkDataWrite
+
+# Action tests with hardcoded catalog parameters
+org.apache.iceberg.spark.actions.TestDeleteReachableFilesAction
+org.apache.iceberg.spark.actions.TestRemoveOrphanFilesAction
+org.apache.iceberg.spark.actions.TestRewriteDataFilesAction
+org.apache.iceberg.spark.actions.TestRewriteManifestsAction
+
+# Tests that don't work with OpenHouse due to functional limitations
+org.apache.iceberg.spark.sql.TestCreateTable
+org.apache.iceberg.spark.sql.TestAlterTable
+org.apache.iceberg.spark.sql.TestDropTable
+org.apache.iceberg.spark.sql.TestAggregatePushDown
+org.apache.iceberg.spark.sql.TestPartitionedWrites.testWriteWithOutputSpec
+org.apache.iceberg.spark.sql.TestPartitionedWritesToBranch.testWriteWithOutputSpec
+org.apache.iceberg.spark.sql.TestPartitionedWritesToWapBranch.testWriteWithOutputSpec
+org.apache.iceberg.spark.sql.TestSparkBucketFunction
+org.apache.iceberg.spark.sql.TestSparkDaysFunction
+org.apache.iceberg.spark.sql.TestSparkHoursFunction
+org.apache.iceberg.spark.sql.TestSparkMonthsFunction
+org.apache.iceberg.spark.sql.TestSparkYearsFunction
+org.apache.iceberg.spark.sql.TestSparkTruncateFunction
+org.apache.iceberg.spark.sql.TestUnpartitionedWritesToBranch
+
+# Spark action tests with different job count behavior
+org.apache.iceberg.spark.actions.TestExpireSnapshotsAction.testUseLocalIterator
+

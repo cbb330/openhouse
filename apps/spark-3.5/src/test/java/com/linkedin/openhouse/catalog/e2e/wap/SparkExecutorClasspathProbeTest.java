@@ -30,13 +30,9 @@ public class SparkExecutorClasspathProbeTest extends OpenHouseSparkITest {
                   Thread t = Thread.currentThread();
                   ClassLoader cl = t.getContextClassLoader();
                   System.out.println(
-                      "🧪 [EXECUTOR] Thread="
-                          + t.getName()
-                          + " ContextClassLoader="
-                          + cl);
+                      "🧪 [EXECUTOR] Thread=" + t.getName() + " ContextClassLoader=" + cl);
                   try {
-                    Class<?> typeDesc =
-                        Class.forName("org.apache.orc.TypeDescription", false, cl);
+                    Class<?> typeDesc = Class.forName("org.apache.orc.TypeDescription", false, cl);
                     CodeSource source = typeDesc.getProtectionDomain().getCodeSource();
                     boolean hasCreateRowBatch =
                         Arrays.stream(typeDesc.getDeclaredMethods())
@@ -81,4 +77,3 @@ public class SparkExecutorClasspathProbeTest extends OpenHouseSparkITest {
     }
   }
 }
-
