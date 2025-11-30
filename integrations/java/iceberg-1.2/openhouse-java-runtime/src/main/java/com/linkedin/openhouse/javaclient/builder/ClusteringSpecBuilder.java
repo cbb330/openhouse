@@ -67,7 +67,7 @@ public final class ClusteringSpecBuilder extends PartitionSpecBuilder {
       int start = transformString.indexOf('[') + 1;
       int end = transformString.indexOf(']');
       if (start > 0 && end > start) {
-        return Collections.singletonList(transformString.substring(start, end));
+        return Collections.singletonList(transformString.substring(start, end).trim());
       }
     }
     return Collections.emptyList();

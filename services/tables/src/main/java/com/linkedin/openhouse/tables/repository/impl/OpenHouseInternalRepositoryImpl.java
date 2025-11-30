@@ -151,6 +151,7 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
           doUpdatePoliciesIfNeeded(updateProperties, tableDto, table.properties());
       boolean sortOrderUpdated =
           doUpdateSortOrderIfNeeded(updateProperties, tableDto, table, writeSchema);
+
       // TODO remove tableTypeAdded after all existing tables have been back-filled to have a
       // tableType
       boolean tableTypeAdded = checkIfTableTypeAdded(updateProperties, table.properties());
@@ -719,6 +720,22 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
   private UnsupportedOperationException getUnsupportedException() {
     return new UnsupportedOperationException(
         "Only save, findById, existsById supported for OpenHouseCatalog");
+  }
+
+  private boolean areSpecsDifferent(PartitionSpec s1, PartitionSpec s2) {
+    if (s1.fields().size() != s2.fields().size()) {
+      return true;
+    }
+    for (int i = 0; i < s1.fields().size(); i++) {
+      PartitionField f1 = s1.fields().get(i);
+      PartitionField f2 = s2.fields().get(i);
+      if (!f1.name().equals(f2.name())
+          || !f1.transform().toString().equals(f2.transform().toString())
+          || f1.sourceId() != f2.sourceId()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private Boolean arePartitionColumnNamesSame(PartitionSpec before, PartitionSpec newSpec) {

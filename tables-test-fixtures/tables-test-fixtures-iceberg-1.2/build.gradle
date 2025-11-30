@@ -54,6 +54,7 @@ dependencies {
     exclude group: 'org.xerial'
 
   }
+  implementation project(':cluster:configs')
   implementation (project(':iceberg:openhouse:internalcatalog')) {
     exclude group: 'org.apache.hadoop'
     exclude group: 'org.ow2.asm'

@@ -53,6 +53,8 @@ public class OpenHouseSparkITest {
     // spark/v3.0/spark/src/main/java/org/apache/iceberg/spark/source/IcebergSource.java#L185
     TestSparkSessionUtil.configureCatalogs(
         builder, "default_iceberg", getOpenHouseLocalServerURI());
+    TestSparkSessionUtil.configureCatalogs(builder, "testhive", getOpenHouseLocalServerURI());
+    TestSparkSessionUtil.configureCatalogs(builder, "spark_catalog", getOpenHouseLocalServerURI());
     return builder;
   }
 

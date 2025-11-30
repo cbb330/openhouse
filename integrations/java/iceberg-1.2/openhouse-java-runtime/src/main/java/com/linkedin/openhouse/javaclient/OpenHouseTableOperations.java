@@ -125,8 +125,9 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
         base == null,
         metadata == null ? "null" : metadata.metadataFileLocation());
     boolean metadataUpdated = isMetadataUpdated(base, metadata);
+    boolean snapshotsUpdated = areSnapshotsUpdated(base, metadata);
     try {
-      if (areSnapshotsUpdated(base, metadata)) {
+      if (snapshotsUpdated) {
         putSnapshots(base, metadata);
       } else if (metadataUpdated) {
         createUpdateTable(base, metadata);

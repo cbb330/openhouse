@@ -177,7 +177,7 @@ class SnapshotAnalysis {
 
     // Compute auto-appended snapshots for MAIN branch (backward compatibility)
     final List<Snapshot> autoAppendedToMainSnapshots;
-    if (!providedRefs.containsKey(SnapshotRef.MAIN_BRANCH) && !unreferencedNewSnapshots.isEmpty()) {
+    if (providedRefs.isEmpty() && !unreferencedNewSnapshots.isEmpty()) {
       autoAppendedToMainSnapshots =
           unreferencedNewSnapshots.stream()
               .filter(s -> !allStagedIds.contains(s.snapshotId()))

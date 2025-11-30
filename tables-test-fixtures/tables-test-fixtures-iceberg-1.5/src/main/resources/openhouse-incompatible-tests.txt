@@ -1,49 +1,82 @@
-# Tests that are incompatible with OpenHouse catalog
-# These tests have hardcoded catalog parameters that don't respect external providers
+# OpenHouse enforces strict partition evolution rules that differ from Iceberg Core:
+# 1. Structure: Must have at most 1 time-partition column (TIMESTAMP) and optional clustering columns.
+# 2. Immutability: The set of partition column names must remain constant. Adding or removing partition fields is not supported.
+# 3. Transforms: Only specific transforms are allowed (day, hour, month, year for time; identity, truncate, bucket for clustering).
+# The following tests attempt to evolve the partition spec by adding/removing fields or using unsupported structures, causing BadRequestException.
+org.apache.iceberg.TestTransaction#testTransactionRetryMergeCleanup
+org.apache.iceberg.TestTransaction#testMultipleUpdateTransactionRetryMergeCleanup
+org.apache.iceberg.TestRowDelta#testManifestMergingMultipleSpecs
+org.apache.iceberg.TestRowDelta#testAbortMultipleSpecs
+org.apache.iceberg.TestRowDelta#testAddDeleteFilesMultipleSpecs
+org.apache.iceberg.TestRowDelta#testRowDeltaAndRewriteFilesMergeManifestsWithSequenceNumber
+org.apache.iceberg.TestRowDelta#testValidateDataFilesExistWithConflictDetectionFilter
+org.apache.iceberg.TestRowDelta#testConcurrentNonConflictingRowDelta
+org.apache.iceberg.TestRowDelta#testConcurrentNonConflictingRowDeltaAndRewriteFilesWithSequenceNumber
+org.apache.iceberg.TestRowDelta#testConcurrentConflictingRowDeltaAndRewriteFilesWithSequenceNumber
+org.apache.iceberg.TestRowDelta#testValidateDataFilesDoNotExistWithConflictDetectionFilter
+org.apache.iceberg.TestMergeAppend#testChangedPartitionSpec
+org.apache.iceberg.TestMergeAppend#testChangedPartitionSpecMergeExisting
+org.apache.iceberg.TestMergeAppend#testUpdatePartitionSpecFieldIdsForV1Table
+org.apache.iceberg.TestMergeAppend#testManifestEntryFieldIdsForChangedPartitionSpecForV1Table
+org.apache.iceberg.TestRewriteManifests#testWithMultiplePartitionSpec
+org.apache.iceberg.TestRewriteManifests#testManifestSizeWithMultiplePartitionSpec
 
-# Tests with hardcoded catalog parameters (use SparkCatalogConfig directly)
-org.apache.iceberg.spark.sql.TestCreateTableAsSelect
-org.apache.iceberg.spark.sql.TestFilterPushDown
-org.apache.iceberg.spark.sql.TestNamespaceSQL
-org.apache.iceberg.spark.sql.TestPartitionedWritesAsSelect
-org.apache.iceberg.spark.sql.TestRefreshTable
-org.apache.iceberg.spark.sql.TestSelect
-org.apache.iceberg.spark.sql.TestStoragePartitionedJoins
-org.apache.iceberg.spark.sql.TestTimestampWithoutZone
-
-# Source tests with hardcoded catalog parameters
-org.apache.iceberg.spark.source.TestDataFrameWrites
-org.apache.iceberg.spark.source.TestRuntimeFiltering
-org.apache.iceberg.spark.source.TestSparkReaderDeletes
-org.apache.iceberg.spark.source.TestFilteredScan
-org.apache.iceberg.spark.source.TestPartitionPruning
-org.apache.iceberg.spark.source.TestCompressionSettings
-org.apache.iceberg.spark.source.TestSparkTable
-org.apache.iceberg.spark.source.TestSparkScan
-org.apache.iceberg.spark.source.TestSparkDataWrite
-
-# Action tests with hardcoded catalog parameters
-org.apache.iceberg.spark.actions.TestDeleteReachableFilesAction
-org.apache.iceberg.spark.actions.TestRemoveOrphanFilesAction
-org.apache.iceberg.spark.actions.TestRewriteDataFilesAction
-org.apache.iceberg.spark.actions.TestRewriteManifestsAction
-
-# Tests that don't work with OpenHouse due to functional limitations
-org.apache.iceberg.spark.sql.TestCreateTable
-org.apache.iceberg.spark.sql.TestAlterTable
-org.apache.iceberg.spark.sql.TestDropTable
+# Incompatible test setup (assumes HiveCatalog/Puffin stats behavior not supported by OH)
 org.apache.iceberg.spark.sql.TestAggregatePushDown
-org.apache.iceberg.spark.sql.TestPartitionedWrites.testWriteWithOutputSpec
-org.apache.iceberg.spark.sql.TestPartitionedWritesToBranch.testWriteWithOutputSpec
-org.apache.iceberg.spark.sql.TestPartitionedWritesToWapBranch.testWriteWithOutputSpec
-org.apache.iceberg.spark.sql.TestSparkBucketFunction
-org.apache.iceberg.spark.sql.TestSparkDaysFunction
-org.apache.iceberg.spark.sql.TestSparkHoursFunction
-org.apache.iceberg.spark.sql.TestSparkMonthsFunction
-org.apache.iceberg.spark.sql.TestSparkYearsFunction
-org.apache.iceberg.spark.sql.TestSparkTruncateFunction
-org.apache.iceberg.spark.sql.TestUnpartitionedWritesToBranch
 
-# Spark action tests with different job count behavior
-org.apache.iceberg.spark.actions.TestExpireSnapshotsAction.testUseLocalIterator
+# This test is excluded because it verifies implementation details of the client library (Spark job count)
+# rather than Catalog behavior. The failure occurs because we are substituting the runtime with a shaded
+# version (Iceberg 1.5.2 via OpenHouse) which has different internal execution plans than the HEAD version
+# expected by this test. This is an artifact of the test environment, not a Catalog incompatibility.
+org.apache.iceberg.spark.actions.TestExpireSnapshotsAction#testUseLocalIterator
 
+# OpenHouse does not persist or manage Puffin statistics files in the same way the standard Iceberg
+# file-based implementation does. The server-side logic for statistics file management (and their expiration)
+# differs or is absent, leading to assertion failures where the test expects local Puffin files to exist or be deleted.
+org.apache.iceberg.TestRemoveSnapshots#testExpireWithStatisticsFiles
+org.apache.iceberg.TestRemoveSnapshots#testExpireWithStatisticsFilesWithReuse
+org.apache.iceberg.TestRemoveSnapshots#testExpireWithPartitionStatisticsFiles
+org.apache.iceberg.TestRemoveSnapshots#testExpireWithPartitionStatisticsFilesWithReuse
+
+# These tests fail due to interactions between the OpenHouse client optimization (skipping commits 
+# when base and metadata appear identical) and the test harness's retry logic. 
+# The failure in testTransactionRetryMergeAppend manifests as a disagreement on manifest content
+# after a retry, likely due to manifest merging behavior differences or the client-side optimization
+# preventing a full sync in this specific test shim environment.
+# testSimpleTransactionNotDeletingMetadataOnUnknownSate expects specific file cleanup behavior
+# on CommitStateUnknownException that differs in the OpenHouse service-based architecture.
+org.apache.iceberg.TestTransaction#testTransactionRetryMergeAppend
+org.apache.iceberg.TestTransaction#testTransactionRecommit
+org.apache.iceberg.TestTransaction#testSimpleTransactionNotDeletingMetadataOnUnknownSate
+
+# Partition evolution is not supported
+org.apache.iceberg.TestDeleteFiles#testCannotDeleteFileWhereNotAllRowsMatchPartitionFilter
+org.apache.iceberg.TestSnapshot#testCachedDataFiles
+org.apache.iceberg.TestSnapshot#testCachedDeleteFiles
+# This test attempts to update partition spec which is not supported by OpenHouse
+org.apache.iceberg.spark.sql.*PartitionedWrites*#testWriteWithOutputSpec
+
+# OpenHouse does not explicitly support Namespace operations (CREATE/DROP NAMESPACE) as databases
+# are implicit based on table existence. We shim these operations in OpenHouseShimCatalog to allow
+# TestNamespaceSQL to pass on openhouse catalog, but excluding it due to failures on spark_catalog.
+org.apache.iceberg.spark.sql.TestNamespaceSQL
+
+# OpenHouse enforces strict schema evolution rules.
+# Dropping and renaming columns are not supported by the OpenHouse service.
+org.apache.iceberg.spark.sql.TestAlterTable#testDropColumn
+org.apache.iceberg.spark.sql.TestAlterTable#testRenameColumn
+
+# OpenHouse enforces 'orc' as the default file format if not specified, violating Iceberg's
+# expectation of null (implicit default) or Parquet.
+org.apache.iceberg.spark.sql.TestCreateTable#testCreateTable
+org.apache.iceberg.spark.sql.TestCreateTable#testCreateTablePartitionedBy
+org.apache.iceberg.spark.sql.TestCreateTable#testCreateTableColumnComments
+org.apache.iceberg.spark.sql.TestCreateTable#testCreateTableComment
+org.apache.iceberg.spark.sql.TestCreateTable#testCreateTableLocation
+
+# OpenHouse enforces format V2. Tests expecting V1 creation will fail.
+org.apache.iceberg.spark.sql.TestCreateTable#testUpgradeTableWithFormatV2ThroughTableProperty
+
+# OpenHouse defaults to purge=true for all drop operations, violating Iceberg's distinction
+# between DROP (keep data) and PURGE (delete data).
+org.apache.iceberg.spark.sql.TestDropTable

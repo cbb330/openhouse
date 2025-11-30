@@ -107,6 +107,13 @@ dependencies {
   }
   // OpenHouseTestTableProvider needs Hadoop Configuration
   compileOnly 'org.apache.hadoop:hadoop-common:3.2.0'
+  
+  // Need TestTables from iceberg-core tests to shim TestTableOperations
+  compileOnly "org.apache.iceberg:iceberg-core:${icebergVersion}:tests"
+  
+  // Need SparkCatalog to extend it in OpenHouseSparkCatalogShim
+  compileOnly "org.apache.iceberg:iceberg-spark-3.5_2.12:${icebergVersion}"
+
   testRuntimeOnly("org.eclipse.jetty:jetty-server:11.0.2")
 }
 
