@@ -52,6 +52,9 @@ dependencies {
     testImplementation(project(tablesTestFixturesModule)) {
         exclude group: "io.netty"
     }
+    // Needed by IcebergTestExecutor for programmatic JUnit Platform execution
+    testImplementation 'org.junit.platform:junit-platform-engine:1.11.0'
+    testImplementation 'org.junit.platform:junit-platform-launcher:1.11.0'
 }
 
 // because we depend on project(':apps:openhouse-spark-apps_2.12').sourceSets

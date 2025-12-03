@@ -50,7 +50,7 @@ public final class TimePartitionSpecBuilder extends PartitionSpecBuilder {
           partitionSpec.schema().findField(timeBasedPartitionFields.get(0).sourceId()).name());
       timePartitionSpec.setGranularity(
           TimePartitionSpec.GranularityEnum.fromValue(
-              timeBasedPartitionFields.get(0).transform().toString().toUpperCase()));
+              timeBasedPartitionFields.get(0).transform().toString().trim().toUpperCase()));
     }
     return timePartitionSpec;
   }

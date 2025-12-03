@@ -1,0 +1,75 @@
+# List of tests to INCLUDE (RUN) against OpenHouse.
+# All other tests will be skipped.
+
+# Spark SQL Tests - Classes explicitly named with WAP/Branch (Include All Methods)
+# org.apache.iceberg.spark.sql.TestPartitionedWritesToWapBranch
+org.apache.iceberg.spark.sql.TestPartitionedWritesToWapBranch#testBranchAndWapBranchCannotBothBeSetForWrite
+org.apache.iceberg.spark.sql.TestPartitionedWritesToWapBranch#testWapIdAndWapBranchCannotBothBeSetForWrite
+org.apache.iceberg.spark.sql.TestPartitionedWritesToWapBranch#testInsertAppend
+org.apache.iceberg.spark.sql.TestPartitionedWritesToWapBranch#testInsertOverwrite
+org.apache.iceberg.spark.sql.TestPartitionedWritesToWapBranch#testDataFrameV2Append
+org.apache.iceberg.spark.sql.TestPartitionedWritesToWapBranch#testDataFrameV2DynamicOverwrite
+org.apache.iceberg.spark.sql.TestPartitionedWritesToWapBranch#testDataFrameV2Overwrite
+org.apache.iceberg.spark.sql.TestPartitionedWritesToWapBranch#testViewsReturnRecentResults
+# Excluded: testWriteWithOutputSpec because OH doesn't support partition evolution
+
+# org.apache.iceberg.spark.sql.TestPartitionedWritesToBranch
+org.apache.iceberg.spark.sql.TestPartitionedWritesToBranch#testInsertAppend
+org.apache.iceberg.spark.sql.TestPartitionedWritesToBranch#testInsertOverwrite
+org.apache.iceberg.spark.sql.TestPartitionedWritesToBranch#testDataFrameV2Append
+org.apache.iceberg.spark.sql.TestPartitionedWritesToBranch#testDataFrameV2DynamicOverwrite
+org.apache.iceberg.spark.sql.TestPartitionedWritesToBranch#testDataFrameV2Overwrite
+org.apache.iceberg.spark.sql.TestPartitionedWritesToBranch#testViewsReturnRecentResults
+# Excluded: testWriteWithOutputSpec because OH doesn't support partition evolution
+
+org.apache.iceberg.spark.sql.TestUnpartitionedWritesToBranch
+
+# Spark Extensions - Classes explicitly named with WAP/Branch (Include All Methods)
+org.apache.iceberg.spark.extensions.TestBranchDDL
+org.apache.iceberg.spark.extensions.TestFastForwardBranchProcedure
+org.apache.iceberg.spark.extensions.TestReplaceBranch
+
+# Spark Extensions - WAP/Branch specific methods from general classes
+org.apache.iceberg.spark.extensions.TestDelete#testDeleteFromNonExistingCustomBranch
+org.apache.iceberg.spark.extensions.TestDelete#testDeleteToWapBranch
+org.apache.iceberg.spark.extensions.TestDelete#testDeleteToWapBranchWithTableBranchIdentifier
+org.apache.iceberg.spark.extensions.TestDelete#testDeleteToCustomWapBranchWithoutWhereClause
+
+org.apache.iceberg.spark.extensions.TestUpdate#testUpdateNonExistingCustomBranch
+org.apache.iceberg.spark.extensions.TestUpdate#testUpdateToWAPBranch
+org.apache.iceberg.spark.extensions.TestUpdate#testUpdateToWapBranchWithTableBranchIdentifier
+
+org.apache.iceberg.spark.extensions.TestMerge#testMergeWithOneMatchingBranchButMultipleSourceRowsForTargetRow
+org.apache.iceberg.spark.extensions.TestMerge#testMergeNonExistingBranch
+org.apache.iceberg.spark.extensions.TestMerge#testMergeToWapBranch
+org.apache.iceberg.spark.extensions.TestMerge#testMergeToWapBranchWithTableBranchIdentifier
+
+# TestPublishChangesProcedure (All methods are WAP related, but class name doesn't have WAP/Branch)
+org.apache.iceberg.spark.extensions.TestPublishChangesProcedure#testApplyWapChangesUsingPositionalArgs
+org.apache.iceberg.spark.extensions.TestPublishChangesProcedure#testApplyWapChangesUsingNamedArgs
+org.apache.iceberg.spark.extensions.TestPublishChangesProcedure#testApplyWapChangesRefreshesRelationCache
+org.apache.iceberg.spark.extensions.TestPublishChangesProcedure#testApplyInvalidWapId
+org.apache.iceberg.spark.extensions.TestPublishChangesProcedure#testInvalidApplyWapChangesCases
+
+# Spark Source - Branch specific methods from TestSnapshotSelection
+org.apache.iceberg.spark.source.TestSnapshotSelection#testSnapshotSelectionByBranch
+org.apache.iceberg.spark.source.TestSnapshotSelection#testSnapshotSelectionByBranchAndTagFails
+org.apache.iceberg.spark.source.TestSnapshotSelection#testSnapshotSelectionByTimestampAndBranchOrTagFails
+org.apache.iceberg.spark.source.TestSnapshotSelection#testSnapshotSelectionByBranchWithSchemaChange
+org.apache.iceberg.spark.source.TestSnapshotSelection#testWritingToBranchAfterSchemaChange
+
+# Iceberg Core - WAP Workflow Test
+org.apache.iceberg.TestWapWorkflow
+
+# Iceberg Core - Branch specific methods
+org.apache.iceberg.TestDeleteFiles#testDeleteFilesOnIndependentBranches
+org.apache.iceberg.TestRemoveSnapshots#testBranchExpiration
+org.apache.iceberg.TestRemoveSnapshots#testFailRemovingSnapshotWhenStillReferencedByBranch
+org.apache.iceberg.TestRemoveSnapshots#testSnapshotParentOfBranchNotUnreferenced
+org.apache.iceberg.TestRemoveSnapshots#testMinSnapshotsToKeepMultipleBranches
+org.apache.iceberg.TestRemoveSnapshots#testMaxSnapshotAgeMultipleBranches
+org.apache.iceberg.TestRemoveSnapshots#testRetainFilesOnRetainedBranches
+org.apache.iceberg.TestSnapshotRefParser#testBranchToJsonDefault
+org.apache.iceberg.TestSnapshotRefParser#testBranchToJsonAllFields
+org.apache.iceberg.TestSnapshotRefParser#testBranchFromJsonDefault
+org.apache.iceberg.TestSnapshotRefParser#testBranchFromJsonAllFields

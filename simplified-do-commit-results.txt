@@ -1,0 +1,110 @@
+Test Summary:
+-------------
+Tests: 60
+Failures: 14
+Ignored: 0
+Duration: 29.143s
+Success Rate: 76%
+
+Failed Tests and Stack Traces:
+------------------------------
+
+1. org.apache.iceberg.TestRemoveSnapshots.testMaxSnapshotAgeMultipleBranches[formatVersion = 2, incrementalCleanup = false]
+   Error: org.apache.iceberg.exceptions.CommitStateUnknownException: Cannot add snapshot with sequence number 2 older than last sequence number 3
+   Stack Trace:
+   	at com.linkedin.openhouse.internal.catalog.OpenHouseInternalTableOperations.doCommit(OpenHouseInternalTableOperations.java:407)
+   	at org.apache.iceberg.BaseMetastoreTableOperations.commit(BaseMetastoreTableOperations.java:135)
+
+2. org.apache.iceberg.TestRemoveSnapshots.testMaxSnapshotAgeMultipleBranches[formatVersion = 2, incrementalCleanup = true]
+   Error: org.apache.iceberg.exceptions.CommitStateUnknownException: Cannot add snapshot with sequence number 2 older than last sequence number 3
+   Stack Trace:
+   	at com.linkedin.openhouse.internal.catalog.OpenHouseInternalTableOperations.doCommit(OpenHouseInternalTableOperations.java:407)
+   	at org.apache.iceberg.BaseMetastoreTableOperations.commit(BaseMetastoreTableOperations.java:135)
+
+3. org.apache.iceberg.TestRemoveSnapshots.testMinSnapshotsToKeepMultipleBranches[formatVersion = 2, incrementalCleanup = false]
+   Error: org.apache.iceberg.exceptions.CommitStateUnknownException: Cannot add snapshot with sequence number 2 older than last sequence number 3
+   Stack Trace:
+   	at com.linkedin.openhouse.internal.catalog.OpenHouseInternalTableOperations.doCommit(OpenHouseInternalTableOperations.java:407)
+   	at org.apache.iceberg.BaseMetastoreTableOperations.commit(BaseMetastoreTableOperations.java:135)
+
+4. org.apache.iceberg.TestRemoveSnapshots.testMinSnapshotsToKeepMultipleBranches[formatVersion = 2, incrementalCleanup = true]
+   Error: org.apache.iceberg.exceptions.CommitStateUnknownException: Cannot add snapshot with sequence number 2 older than last sequence number 3
+   Stack Trace:
+   	at com.linkedin.openhouse.internal.catalog.OpenHouseInternalTableOperations.doCommit(OpenHouseInternalTableOperations.java:407)
+   	at org.apache.iceberg.BaseMetastoreTableOperations.commit(BaseMetastoreTableOperations.java:135)
+
+5. org.apache.iceberg.TestRemoveSnapshots.testRetainFilesOnRetainedBranches[formatVersion = 2, incrementalCleanup = false]
+   Error: org.apache.iceberg.exceptions.CommitStateUnknownException: Cannot add snapshot with sequence number 3 older than last sequence number 5
+   Stack Trace:
+   	at com.linkedin.openhouse.internal.catalog.OpenHouseInternalTableOperations.doCommit(OpenHouseInternalTableOperations.java:407)
+   	at org.apache.iceberg.BaseMetastoreTableOperations.commit(BaseMetastoreTableOperations.java:135)
+
+6. org.apache.iceberg.TestRemoveSnapshots.testRetainFilesOnRetainedBranches[formatVersion = 2, incrementalCleanup = true]
+   Error: org.apache.iceberg.exceptions.CommitStateUnknownException: Cannot add snapshot with sequence number 3 older than last sequence number 5
+   Stack Trace:
+   	at com.linkedin.openhouse.internal.catalog.OpenHouseInternalTableOperations.doCommit(OpenHouseInternalTableOperations.java:407)
+   	at org.apache.iceberg.BaseMetastoreTableOperations.commit(BaseMetastoreTableOperations.java:135)
+
+7. org.apache.iceberg.TestWapWorkflow.testCherrypickingAncestor[formatVersion = 2]
+   Error: java.lang.AssertionError: Snapshot log should indicate number of snapshots committed expected:<2> but was:<1>
+   Stack Trace:
+   	at org.junit.Assert.fail(Assert.java:89)
+   	at org.junit.Assert.failNotEquals(Assert.java:835)
+   	at org.junit.Assert.assertEquals(Assert.java:647)
+   	at org.apache.iceberg.TestWapWorkflow.testCherrypickingAncestor(TestWapWorkflow.java:650)
+
+8. org.apache.iceberg.TestWapWorkflow.testCurrentSnapshotOperation[formatVersion = 2]
+   Error: java.lang.AssertionError: Snapshot log should indicate number of snapshots committed expected:<2> but was:<1>
+   Stack Trace:
+   	at org.junit.Assert.fail(Assert.java:89)
+   	at org.junit.Assert.failNotEquals(Assert.java:835)
+   	at org.junit.Assert.assertEquals(Assert.java:647)
+   	at org.apache.iceberg.TestWapWorkflow.testCurrentSnapshotOperation(TestWapWorkflow.java:139)
+
+9. org.apache.iceberg.TestWapWorkflow.testDuplicateCherrypick[formatVersion = 2]
+   Error: java.lang.AssertionError: Snapshot log should indicate number of snapshots committed expected:<2> but was:<1>
+   Stack Trace:
+   	at org.junit.Assert.fail(Assert.java:89)
+   	at org.junit.Assert.failNotEquals(Assert.java:835)
+   	at org.junit.Assert.assertEquals(Assert.java:647)
+   	at org.apache.iceberg.TestWapWorkflow.testDuplicateCherrypick(TestWapWorkflow.java:705)
+
+10. org.apache.iceberg.TestWapWorkflow.testSetCurrentSnapshotNoWAP[formatVersion = 2]
+    Error: java.lang.AssertionError: Snapshot log should indicate number of snapshots committed expected:<3> but was:<1>
+    Stack Trace:
+    	at org.junit.Assert.fail(Assert.java:89)
+    	at org.junit.Assert.failNotEquals(Assert.java:835)
+    	at org.junit.Assert.assertEquals(Assert.java:647)
+    	at org.apache.iceberg.TestWapWorkflow.testSetCurrentSnapshotNoWAP(TestWapWorkflow.java:170)
+
+11. org.apache.iceberg.TestWapWorkflow.testWithCherryPickingWithCommitRetry[formatVersion = 2]
+    Error: java.lang.AssertionError: Snapshot log should indicate number of snapshots committed expected:<2> but was:<1>
+    Stack Trace:
+    	at org.junit.Assert.fail(Assert.java:89)
+    	at org.junit.Assert.failNotEquals(Assert.java:835)
+    	at org.junit.Assert.assertEquals(Assert.java:647)
+    	at org.apache.iceberg.TestWapWorkflow.testWithCherryPickingWithCommitRetry(TestWapWorkflow.java:602)
+
+12. org.apache.iceberg.TestWapWorkflow.testWithCherryPicking[formatVersion = 2]
+    Error: java.lang.AssertionError: Snapshot log should indicate number of snapshots committed expected:<2> but was:<1>
+    Stack Trace:
+    	at org.junit.Assert.fail(Assert.java:89)
+    	at org.junit.Assert.failNotEquals(Assert.java:835)
+    	at org.junit.Assert.assertEquals(Assert.java:647)
+    	at org.apache.iceberg.TestWapWorkflow.testWithCherryPicking(TestWapWorkflow.java:331)
+
+13. org.apache.iceberg.TestWapWorkflow.testWithCommitsBetweenCherryPicking[formatVersion = 2]
+    Error: java.lang.AssertionError: Snapshot log should indicate number of snapshots committed expected:<2> but was:<1>
+    Stack Trace:
+    	at org.junit.Assert.fail(Assert.java:89)
+    	at org.junit.Assert.failNotEquals(Assert.java:835)
+    	at org.junit.Assert.assertEquals(Assert.java:647)
+    	at org.apache.iceberg.TestWapWorkflow.testWithCommitsBetweenCherryPicking(TestWapWorkflow.java:485)
+
+14. org.apache.iceberg.TestWapWorkflow.testWithTwoPhaseCherryPicking[formatVersion = 2]
+    Error: java.lang.AssertionError: Snapshot log should indicate number of snapshots committed expected:<2> but was:<1>
+    Stack Trace:
+    	at org.junit.Assert.fail(Assert.java:89)
+    	at org.junit.Assert.failNotEquals(Assert.java:835)
+    	at org.junit.Assert.assertEquals(Assert.java:647)
+    	at org.apache.iceberg.TestWapWorkflow.testWithTwoPhaseCherryPicking(TestWapWorkflow.java:399)

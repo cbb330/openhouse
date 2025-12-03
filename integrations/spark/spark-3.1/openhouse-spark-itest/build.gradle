@@ -47,6 +47,9 @@ task statementTest(type: Test) {
   filter {
     includeTestsMatching 'com.linkedin.openhouse.spark.statementtest.*'
   }
+  // Run tests sequentially to avoid SparkSession port conflicts
+  maxParallelForks = 1
+  forkEvery = 1  // Fork a new JVM for each test class to ensure clean SparkSession
   if (JavaVersion.current() >= JavaVersion.VERSION_1_9) {
     jvmArgs \
         '--add-opens=java.base/java.nio=ALL-UNNAMED',

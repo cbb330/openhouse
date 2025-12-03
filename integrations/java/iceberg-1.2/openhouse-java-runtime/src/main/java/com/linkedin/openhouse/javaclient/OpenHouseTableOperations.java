@@ -77,6 +77,7 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
 
   @Override
   public void doRefresh() {
+    validateNamespace("doRefresh");
     log.info("Calling doRefresh for table: {}", tableName());
     Optional<String> tableLocation =
         tableApi
@@ -86,8 +87,21 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
              on 404 from table service, resume the stream as empty response.
              for any other error, surface it!
             */
-            .onErrorResume(WebClientResponseException.NotFound.class, e -> Mono.empty())
-            .onErrorResume(WebClientResponseException.BadRequest.class, e -> Mono.empty())
+            .onErrorResume(
+                WebClientResponseException.NotFound.class,
+                e -> {
+                  log.warn("Table {} not found during refresh", tableName());
+                  return Mono.empty();
+                })
+            .onErrorResume(
+                WebClientResponseException.BadRequest.class,
+                e -> {
+                  log.warn(
+                      "BadRequest during refresh for table {}: {}",
+                      tableName(),
+                      e.getResponseBodyAsString());
+                  return Mono.empty();
+                })
             .onErrorResume(
                 WebClientResponseException.class,
                 e -> Mono.error(new WebClientResponseWithMessageException(e)))
@@ -105,10 +119,15 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
 
   @Override
   public void doCommit(TableMetadata base, TableMetadata metadata) {
-    log.info("Calling doCommit for table: {}", tableName());
+    log.info(
+        "Calling doCommit for table: {}, base null? {}, new metadata loc {}",
+        tableName(),
+        base == null,
+        metadata == null ? "null" : metadata.metadataFileLocation());
     boolean metadataUpdated = isMetadataUpdated(base, metadata);
+    boolean snapshotsUpdated = areSnapshotsUpdated(base, metadata);
     try {
-      if (areSnapshotsUpdated(base, metadata)) {
+      if (snapshotsUpdated) {
         putSnapshots(base, metadata);
       } else if (metadataUpdated) {
         createUpdateTable(base, metadata);
@@ -145,6 +164,12 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
    * @param metadata The new metadata used for creation/update.
    */
   private void createUpdateTable(TableMetadata base, TableMetadata metadata) {
+    validateNamespace("createUpdateTable");
+    log.info(
+        "OpenHouseTableOperations#createUpdateTable invoked for {} (base null? {}, metadata location {})",
+        tableName(),
+        base == null,
+        metadata.metadataFileLocation());
     CreateUpdateTableRequestBody createUpdateTableRequestBody =
         constructMetadataRequestBody(base, metadata);
 
@@ -304,6 +329,12 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
    * @param newMetadata metadata containing a new snapshot
    */
   private void putSnapshots(TableMetadata base, TableMetadata newMetadata) {
+    validateNamespace("putSnapshots");
+    log.info(
+        "OpenHouseTableOperations#putSnapshots invoked for {} (base null? {}, new snapshots count {})",
+        tableName(),
+        base == null,
+        newMetadata.snapshots() == null ? 0 : newMetadata.snapshots().size());
     IcebergSnapshotsRequestBody icebergSnapshotsRequestBody = new IcebergSnapshotsRequestBody();
     CreateUpdateTableRequestBody createUpdateTableRequestBody =
         constructMetadataRequestBody(base, newMetadata);
@@ -376,6 +407,18 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
               e.getClass().getSimpleName()),
           e);
       return Mono.error(new CommitStateUnknownException(e));
+    }
+  }
+
+  private void validateNamespace(String context) {
+    if (tableIdentifier.namespace().levels().length > 1) {
+      log.warn(
+          "Rejecting {} for {} due to multi-level namespace: {}",
+          context,
+          tableIdentifier,
+          tableIdentifier.namespace());
+      throw new NoSuchTableException(
+          "OpenHouse catalog does not support multi-level namespaces: %s", tableIdentifier);
     }
   }
 }
