@@ -126,6 +126,9 @@ shadowJar {
   // Include shadow configuration dependencies - shadow first to prefer relocated classes
   configurations = [project.configurations.shadow, project.configurations.runtimeClasspath]
 
+  // Exclude Multi-Release JAR version-specific classes to avoid Java 19 bytecode
+  exclude 'META-INF/versions/**'
+
   mergeServiceFiles()
 
   append 'META-INF/spring.handlers'
