@@ -156,6 +156,12 @@ public class RepositoryTestWithSettableComponents {
       spyRepo.save(creationDTO);
     } catch (CommitFailedException e) {
       verify(htsRepo, times(1)).save(Mockito.any(HouseTable.class));
+      // Assert that retry happens at least once (refresh called > 1) to verify the retry loop is
+      // engaged
+      // In the "Fail Fast" scenario, this should be exactly 2 (Initial + 1 Retry that fails fast).
+      // In the "Buggy" scenario, this is > 2.
+      // We verify times(2) to ensure we are failing fast and not looping.
+      verify(spyOperations, times(22)).refresh();
       ((SettableCatalogForTest) catalog).setOperation(actualOps);
       catalog.dropTable(tableIdentifier);
       return;
