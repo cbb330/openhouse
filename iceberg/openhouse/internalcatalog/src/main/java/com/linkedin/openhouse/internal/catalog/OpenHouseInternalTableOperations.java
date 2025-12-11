@@ -91,6 +91,10 @@ public class OpenHouseInternalTableOperations extends BaseMetastoreTableOperatio
 
   @Override
   protected void doRefresh() {
+    if (currentMetadataLocation() != null) {
+      disableRefresh();
+      return;
+    }
     Optional<HouseTable> houseTable = Optional.empty();
     try {
       houseTable =
@@ -120,7 +124,10 @@ public class OpenHouseInternalTableOperations extends BaseMetastoreTableOperatio
   protected void refreshMetadata(final String metadataLoc) {
     long startTime = System.currentTimeMillis();
     boolean needToReload = !Objects.equal(currentMetadataLocation(), metadataLoc);
-    Runnable r = () -> super.refreshFromMetadataLocation(metadataLoc);
+    Runnable r =
+        () ->
+            super.refreshFromMetadataLocation(
+                metadataLoc, null, 20, this::loadMetadataWithNoRetries);
     try {
       if (needToReload) {
         metricsReporter.executeWithStats(
@@ -140,6 +147,13 @@ public class OpenHouseInternalTableOperations extends BaseMetastoreTableOperatio
           e);
       throw e;
     }
+  }
+
+  private TableMetadata loadMetadataWithNoRetries(String location) {
+    TableMetadata metadata = TableMetadataParser.read(io(), location);
+    Map<String, String> properties = new HashMap<>(metadata.properties());
+    properties.put(TableProperties.COMMIT_NUM_RETRIES, "0");
+    return TableMetadata.buildFrom(metadata).setProperties(properties).build();
   }
 
   /**
