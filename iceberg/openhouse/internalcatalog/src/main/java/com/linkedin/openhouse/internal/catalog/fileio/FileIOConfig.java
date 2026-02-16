@@ -2,16 +2,19 @@ package com.linkedin.openhouse.internal.catalog.fileio;
 
 import com.linkedin.openhouse.cluster.storage.StorageManager;
 import com.linkedin.openhouse.cluster.storage.StorageType;
+import com.linkedin.openhouse.cluster.storage.hdfs.DiagnosticHadoopFileIO;
+import java.util.HashMap;
 import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.iceberg.aws.s3.S3FileIO;
 import org.apache.iceberg.azure.adlsv2.ADLSFileIO;
 import org.apache.iceberg.hadoop.HadoopFileIO;
 import org.apache.iceberg.io.FileIO;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
 import software.amazon.awssdk.services.s3.S3Client;
 
 /**
@@ -24,13 +27,39 @@ import software.amazon.awssdk.services.s3.S3Client;
  * between them.
  */
 @Slf4j
-@Configuration
+@org.springframework.context.annotation.Configuration
 public class FileIOConfig {
 
   @Autowired StorageManager storageManager;
 
   /**
-   * Provides the HdfsFileIO bean for HDFS storage type
+   * Enable diagnostic logging for HDFS operations. When enabled, detailed metrics are logged for
+   * every FileIO operation including: read/write latency, bytes transferred, NameNode host, hedged
+   * read statistics, and retry counts.
+   *
+   * <p>Set to true when diagnosing P90/P99 latency issues. Log output format:
+   *
+   * <pre>
+   * HDFS_STREAM_READ path=/.../metadata.json duration_ms=150 bytes_read=4096 read_calls=2
+   * HDFS_SLOW_READ path=/.../metadata.json duration_ms=1500 bytes_read=4096
+   * </pre>
+   */
+  @Value("${openhouse.hdfs.diagnostic.logging.enabled:false}")
+  private boolean hdfsDiagnosticLoggingEnabled;
+
+  /**
+   * Provides the HdfsFileIO bean for HDFS storage type.
+   *
+   * <p>When diagnostic logging is enabled (openhouse.hdfs.diagnostic.logging.enabled=true), returns
+   * a {@link DiagnosticHadoopFileIO} that logs detailed HDFS operation metrics including:
+   *
+   * <ul>
+   *   <li>Read/write duration breakdown
+   *   <li>Bytes transferred
+   *   <li>NameNode host (for Active vs Observer analysis)
+   *   <li>Hedged read statistics
+   *   <li>Slow operation warnings (>500ms reads, >1000ms writes)
+   * </ul>
    *
    * @return HdfsFileIO bean for HDFS storage type, or null if HDFS storage type is not configured
    */
@@ -39,7 +68,24 @@ public class FileIOConfig {
     try {
       FileSystem fs =
           (FileSystem) storageManager.getStorage(StorageType.HDFS).getClient().getNativeClient();
-      return new HadoopFileIO(fs.getConf());
+      Configuration conf = fs.getConf();
+
+      if (hdfsDiagnosticLoggingEnabled) {
+        log.info("HDFS diagnostic logging ENABLED - detailed operation metrics will be logged");
+        DiagnosticHadoopFileIO diagnosticFileIO = new DiagnosticHadoopFileIO(conf);
+
+        // Initialize with properties to enable internal diagnostic flag
+        Map<String, String> props = new HashMap<>();
+        props.put("openhouse.hdfs.diagnostic.logging.enabled", "true");
+        diagnosticFileIO.initialize(props);
+
+        // Config is logged automatically during init()
+        return diagnosticFileIO;
+      } else {
+        log.info(
+            "HDFS diagnostic logging disabled. Enable with openhouse.hdfs.diagnostic.logging.enabled=true");
+        return new HadoopFileIO(conf);
+      }
     } catch (IllegalArgumentException e) {
       // If the HDFS storage type is not configured, return null
       // Spring doesn't define the bean if the return value is null
