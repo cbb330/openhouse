@@ -15,38 +15,61 @@ Phase 1 is intentionally read-only and targets immediate compatibility for:
 
 The phase-1 contract-first wiring is implemented as:
 
-- Canonical spec:
-  - `spec/openhouse-iceberg-rest-readonly-v1.yaml`
+- Upstream spec (codegen source):
+  - `spec/iceberg-rest-catalog-open-api.yaml` — full upstream Iceberg REST OpenAPI spec (1.10)
+  - Used by codegen to generate `CatalogApiApi` and `ConfigurationApiApi` interfaces
+  - Unimplemented endpoints inherit 501 (Not Implemented) defaults from generated interfaces
+- Subset spec (documentation):
+  - `spec/openhouse-iceberg-rest-readonly-v1.yaml` — documents the read-only subset OpenHouse actually implements
 - Build/codegen/lint gate in `services/tables/build.gradle`:
-  - `setUpOpenApiCliForIcebergRest`
-  - `validateIcebergRestOpenApiSpec`
-  - `generateIcebergRestOpenApiServer`
+  - `setUpOpenApiCliForIcebergRest` — downloads openapi-generator-cli
+  - `validateIcebergRestOpenApiSpec` — validates spec syntax
+  - `generateIcebergRestOpenApiServer` — generates Spring interfaces with Iceberg type mappings
   - `compileJava` depends on generated interfaces
   - `check` depends on OpenAPI validation
+  - Post-processing regex replaces Iceberg 1.10-only `@RequestBody` types with `Object` for 1.5.2 compatibility
+- Type mappings (Polaris pattern):
+  - `importMappings` and `typeMappings` map spec schema names to real Iceberg library types
+  - No model classes are generated (`models=false`); interfaces reference existing Iceberg request/response types
 - Controller contract implementation:
   - `services/tables/src/main/java/com/linkedin/openhouse/tables/controller/IcebergRestCatalogController.java`
-  - Implements generated `IcebergReadOnlyApi`
-  - Adds explicit `HEAD /v1/namespaces/{namespace}/tables/{table}` for `table_exists`
+  - Implements generated `CatalogApiApi` and `ConfigurationApiApi` interfaces
+  - Overrides only `getConfig`, `listTables`, `loadTable`, and `tableExists`
+  - Routes through `TablesService` for auth and `OpenHouseInternalCatalog` for table loading
+- Serialization:
+  - `IcebergRestHttpMessageConverter` — custom `AbstractHttpMessageConverter<RESTResponse>` using Iceberg's `RESTSerializers` (kebab-case JSON)
+  - `IcebergRestSerdeConfig` — registers the converter via `WebMvcConfigurer.extendMessageConverters`
+  - `IcebergRestSerde` — central ObjectMapper configuration with Iceberg serializer modules
+- Exception handling:
+  - `IcebergRestExceptionHandler` — scoped `@RestControllerAdvice` returning Iceberg `ErrorResponse` format
 - Runtime compatibility coverage:
-  - Java controller tests in
+  - Round-trip integration tests (21 tests) using real Iceberg `RESTCatalog` client:
+    `services/tables/src/test/java/com/linkedin/openhouse/tables/e2e/h2/IcebergRestCatalogRoundTripTest.java`
+  - MockMvc unit tests (6 tests):
     `services/tables/src/test/java/com/linkedin/openhouse/tables/mock/controller/IcebergRestCatalogControllerTest.java`
-  - PyIceberg smoke test in
+  - PyIceberg smoke test:
     `integrations/python/dataloader/scripts/iceberg_rest_catalog_smoke.py`
 - CI automation:
   - `.github/workflows/build-run-tests.yml` runs:
-    - `./gradlew :services:tables:check`
+    - `./gradlew clean build :services:tables:check`
     - PyIceberg smoke test script
 
 Justification for each component:
 
-- Canonical spec in-repo:
-  - PR-reviewable contract changes and reproducible builds.
-- Generated interfaces + controller implementation:
+- Full upstream spec as codegen source:
+  - Generates interfaces for all Iceberg REST operations, giving free 501 defaults for unimplemented endpoints.
+  - Avoids maintaining a hand-curated subset spec for codegen (the subset spec is documentation only).
+  - When write endpoints are added in phase 2+, only the controller needs updating — no spec changes required.
+- Generated interfaces + Iceberg type mappings:
   - Compile-time enforcement that route/method/signature drift fails build.
+  - Reuses real Iceberg types (no generated model classes) following the Polaris pattern.
 - `check` dependency on spec validation:
   - Ensures OpenAPI syntax/contract checks are in the standard CI gate.
+- Custom message converter:
+  - Iceberg REST uses kebab-case JSON with custom serializers that differ from OpenHouse's Jackson config.
+  - Separate converter avoids interfering with existing OpenHouse API serialization.
 - Runtime smoke tests:
-  - Validates wire behavior that compile-time checks cannot prove (`HEAD`, status behavior, client interoperability).
+  - Validates wire behavior that compile-time checks cannot prove (`HEAD`, status codes, client interoperability).
 
 ## Why This Plan
 
@@ -97,25 +120,33 @@ For unsupported Iceberg REST operations, return `501 Not Implemented` with Icebe
 
 ### 1) Spec as source of truth
 
-- Add canonical OpenAPI file in repo:
-  - `spec/openhouse-iceberg-rest-readonly-v1.yaml`
+- Upstream spec (codegen source): `spec/iceberg-rest-catalog-open-api.yaml`
+  - Full Iceberg REST OpenAPI spec vendored from upstream (Apache Iceberg 1.10).
+  - Used by the openapi-generator to produce Spring interfaces.
+  - Unimplemented operations get auto-generated 501 defaults.
+- Subset spec (documentation): `spec/openhouse-iceberg-rest-readonly-v1.yaml`
+  - Documents which endpoints OpenHouse actually implements in phase 1.
+  - Not used by codegen — purely for human reference and PR review.
 - Keep `docs/specs/*.md` as generated docs only.
 
 Justification:
 
+- Using the full upstream spec avoids maintaining a curated subset for codegen and gives free 501 defaults.
 - Contract diffs are visible in PRs.
 - Builds are reproducible and do not depend on remote spec availability.
 - Branches/tags remain self-contained.
 
 ### 2) Server implements generated API interfaces
 
-- Generate Spring server interfaces/models from canonical spec during build.
+- Generate Spring server interfaces from the upstream spec during build (no model generation).
+- Map spec schema names to real Iceberg library types via `importMappings`/`typeMappings` (Polaris pattern).
+- Controller implements generated `CatalogApiApi` and `ConfigurationApiApi`, overriding only read-only methods.
 - Keep business logic in existing handlers/services.
-- Make controller classes thin adapters that implement generated interfaces.
 
 Justification:
 
 - Compile-time contract enforcement for endpoint signatures, params, and DTO wiring.
+- Reusing real Iceberg types avoids generated model classes and ensures wire-format compatibility.
 - Clear separation of concerns:
   - generated API surface = contract
   - handwritten handlers/services = business logic
@@ -158,49 +189,54 @@ Justification:
 
 ### A) Spec and generation
 
-1. Add canonical subset spec file:
-   - `spec/openhouse-iceberg-rest-readonly-v1.yaml`
-2. Add Gradle codegen task in `services/tables/build.gradle`:
-   - generate server interfaces/models into `build/generated/openapi/iceberg-rest-server`
-3. Add generated sources to `compileJava`
-4. Ensure `compileJava` depends on codegen task
+1. Vendor upstream Iceberg REST OpenAPI spec:
+   - `spec/iceberg-rest-catalog-open-api.yaml` (full spec, codegen source)
+2. Add read-only subset spec for documentation:
+   - `spec/openhouse-iceberg-rest-readonly-v1.yaml` (not used by codegen)
+3. Add Gradle codegen tasks in `services/tables/build.gradle`:
+   - `setUpOpenApiCliForIcebergRest` — downloads openapi-generator-cli
+   - `validateIcebergRestOpenApiSpec` — validates spec syntax
+   - `generateIcebergRestOpenApiServer` — generates Spring interfaces with Iceberg type mappings
+   - Post-processing regex replaces Iceberg 1.10-only `@RequestBody` types with `Object` for 1.5.2 compatibility
+4. Add generated sources to `compileJava`, ensure `compileJava` depends on codegen task
 
 ### B) Controller alignment
 
-1. Update `IcebergRestCatalogController` to implement generated interfaces
-2. Keep delegation to current logic:
-   - `OpenHouseInternalCatalog`
-   - `TablesService`
-   - `TablesApiValidator`
-3. Add explicit `HEAD` handler for table existence
-4. Keep `IcebergRestExceptionHandler` as the only mapper for Iceberg REST error payloads
+1. `IcebergRestCatalogController` implements generated `CatalogApiApi` and `ConfigurationApiApi`
+2. Overrides only: `getConfig`, `listTables`, `loadTable`, `tableExists`
+3. Delegates to:
+   - `TablesService` for auth-aware table listing and access checks
+   - `OpenHouseInternalCatalog` + `CatalogHandlers.loadTable` for table metadata
+   - `TablesApiValidator` for input validation
+4. `IcebergRestExceptionHandler` — scoped `@RestControllerAdvice` returning Iceberg `ErrorResponse` format
+5. `IcebergRestHttpMessageConverter` + `IcebergRestSerdeConfig` — custom serde using Iceberg's `RESTSerializers`
 
 ### C) Test coverage
 
-1. Extend unit/controller tests:
-   - `services/tables/src/test/java/com/linkedin/openhouse/tables/mock/controller/IcebergRestCatalogControllerTest.java`
-2. Add tests for:
-   - `HEAD` success and not-found
-   - status/error payload correctness
-3. Add Python compatibility smoke test using stock PyIceberg `RestCatalog`:
-   - verifies `load_table`, `list_tables`, `table_exists`
+1. Round-trip integration tests (21 tests) using real Iceberg `RESTCatalog` client:
+   - `IcebergRestCatalogRoundTripTest` — list tables, load table schema/partition/metadata, HEAD exists/not-found, error handling, cross-namespace isolation
+2. MockMvc unit tests (6 tests):
+   - `IcebergRestCatalogControllerTest` — config, list, load, load not found, head exists, head not found
+3. Python compatibility smoke test using stock PyIceberg `RestCatalog`:
+   - verifies `table_exists`, `list_tables`, `load_table`
 
 ### D) CI automation
 
-1. Update `.github/workflows/build-run-tests.yml` to run:
-   - `./gradlew :services:tables:check`
-   - Python PyIceberg smoke test
-2. Ensure PR workflow keeps this required via:
-   - `.github/workflows/pr-validations.yml`
+1. `.github/workflows/build-run-tests.yml` runs:
+   - `./gradlew clean build :services:tables:check`
+   - PyIceberg smoke test script
 
 ## Deliverables
 
-- Canonical spec file for Iceberg REST subset
-- Generated server API interfaces/models wired into build
-- Controller implementing generated interfaces
+- Upstream Iceberg REST spec vendored in-repo (codegen source)
+- Read-only subset spec for documentation
+- Generated server API interfaces (no models) with Iceberg type mappings
+- Controller implementing `CatalogApiApi` + `ConfigurationApiApi` (read-only overrides only)
+- Custom serde for Iceberg REST wire format (kebab-case JSON via `RESTSerializers`)
+- Scoped exception handler returning Iceberg `ErrorResponse` format
 - `HEAD` support for table existence
 - OpenAPI validation and codegen wired into `check`
-- Runtime compatibility tests wired into CI workflow
+- Round-trip integration tests (21) + MockMvc unit tests (6) + PyIceberg smoke test
 - CI gate proving compatibility
 
 ## Acceptance Criteria

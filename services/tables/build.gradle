@@ -160,8 +160,20 @@ tasks.register('generateIcebergRestOpenApiServer', Exec) {
       "--type-mappings", icebergTypeMappings,
       "--global-property", "apis,models=false,apiTests=false,apiDocs=false,modelTests=false,modelDocs=false,supportingFiles=",
       "--additional-properties", "interfaceOnly=true,useTags=true,skipDefaultInterface=false,hideGenerationTimestamp=true,useSpringBoot3=false"
-  // Post-process: typeMappings does not replace @RequestBody parameter types when models=false.
-  // Replace remaining Iceberg 1.10-only request/response types with Object so the code compiles.
+  // Post-process generated code for Iceberg 1.5.2 compatibility.
+  //
+  // Problem: importMappings/typeMappings handle return types and @Schema annotations, but the
+  // openapi-generator does NOT apply typeMappings to @RequestBody parameter types when
+  // models=false. This leaves bare references to types that don't exist in Iceberg 1.5.2
+  // (they were added in 1.10+), causing compilation failures.
+  //
+  // Fix: regex-replace those bare type names with Object in generated .java files.
+  // The regex `\bTypeName\b(?=\s+\w)` matches "TypeName paramName" patterns (i.e., a type
+  // followed by whitespace and a parameter name) without touching import statements, comments,
+  // or string literals where the type name isn't used as a declaration.
+  //
+  // This workaround can be removed when OpenHouse upgrades to Iceberg 1.7+ where these types
+  // exist natively. Track via: https://github.com/linkedin/openhouse/issues/XXX
   doLast {
     def replacements = [
         'CommitTableRequest': 'Object',
@@ -173,7 +185,6 @@ tasks.register('generateIcebergRestOpenApiServer', Exec) {
       def text = f.text
       def original = text
       replacements.each { from, to ->
-        // Replace bare type references in method parameters (e.g. "CommitTableRequest commitTableRequest")
         text = text.replaceAll("\\b${from}\\b(?=\\s+\\w)", to)
       }
       if (text != original) {
