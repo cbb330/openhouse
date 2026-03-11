@@ -39,11 +39,6 @@ def generatedIcebergRestDir = "${buildDir}/generated/openapi/iceberg-rest-server
 /**
  * Map OpenAPI spec schema names to existing Iceberg library types so the generated interfaces
  * use real Iceberg request/response classes instead of generating new model classes.
- * This follows the same pattern as Apache Polaris.
- */
-/**
- * Map OpenAPI spec schema names to existing Iceberg library types so the generated interfaces
- * use real Iceberg request/response classes instead of generating new model classes.
  * This follows the same pattern as Apache Polaris (see polaris/api/iceberg-service/build.gradle.kts).
  *
  * importMappings replace the import statement for a given schema name.

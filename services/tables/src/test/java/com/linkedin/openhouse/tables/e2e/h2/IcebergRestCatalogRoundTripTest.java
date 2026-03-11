@@ -302,7 +302,7 @@ public class IcebergRestCatalogRoundTripTest {
   @Test
   void loadTableFromNonexistentNamespaceThrows() {
     assertThatThrownBy(() -> restCatalog.loadTable(TableIdentifier.of("no_such_db", T1)))
-        .isInstanceOf(Exception.class);
+        .isInstanceOf(NoSuchTableException.class);
   }
 
   // ---------------------------------------------------------------------------

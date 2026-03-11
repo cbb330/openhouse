@@ -30,7 +30,7 @@ public class IcebergRestExceptionHandler {
 
   @ExceptionHandler({RequestValidationFailureException.class, IllegalArgumentException.class})
   public ResponseEntity<String> handleBadRequest(Exception e) {
-    return errorResponse(400, e.getMessage(), e.getClass().getSimpleName(), e);
+    return errorResponse(400, e.getMessage(), IllegalArgumentException.class.getSimpleName(), e);
   }
 
   @ExceptionHandler(AccessDeniedException.class)
@@ -56,7 +56,6 @@ public class IcebergRestExceptionHandler {
             .responseCode(statusCode)
             .withMessage(message)
             .withType(type)
-            .withStackTrace(throwable)
             .build();
     return ResponseEntity.status(statusCode)
         .contentType(MediaType.APPLICATION_JSON)
