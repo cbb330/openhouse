@@ -14,8 +14,6 @@ import com.linkedin.openhouse.tables.client.model.CreateUpdateTableRequestBody;
 import com.linkedin.openhouse.tables.client.model.GetTableResponseBody;
 import com.linkedin.openhouse.tables.client.model.IcebergSnapshotsRequestBody;
 import com.linkedin.openhouse.tables.client.model.Policies;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
@@ -79,6 +77,7 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
 
   @Override
   public void doRefresh() {
+    validateNamespace("doRefresh");
     log.info("Calling doRefresh for table: {}", tableName());
     Optional<String> tableLocation =
         tableApi
@@ -88,8 +87,21 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
              on 404 from table service, resume the stream as empty response.
              for any other error, surface it!
             */
-            .onErrorResume(WebClientResponseException.NotFound.class, e -> Mono.empty())
-            .onErrorResume(WebClientResponseException.BadRequest.class, e -> Mono.empty())
+            .onErrorResume(
+                WebClientResponseException.NotFound.class,
+                e -> {
+                  log.warn("Table {} not found during refresh", tableName());
+                  return Mono.empty();
+                })
+            .onErrorResume(
+                WebClientResponseException.BadRequest.class,
+                e -> {
+                  log.warn(
+                      "BadRequest during refresh for table {}: {}",
+                      tableName(),
+                      e.getResponseBodyAsString());
+                  return Mono.empty();
+                })
             .onErrorResume(
                 WebClientResponseException.class,
                 e -> Mono.error(new WebClientResponseWithMessageException(e)))
@@ -107,15 +119,15 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
 
   @Override
   public void doCommit(TableMetadata base, TableMetadata metadata) {
-    log.info("Calling doCommit for table: {}", tableName());
+    log.info(
+        "Calling doCommit for table: {}, base null? {}, new metadata loc {}",
+        tableName(),
+        base == null,
+        metadata == null ? "null" : metadata.metadataFileLocation());
     boolean metadataUpdated = isMetadataUpdated(base, metadata);
     boolean snapshotsUpdated = areSnapshotsUpdated(base, metadata);
     try {
-      if (metadataUpdated && snapshotsUpdated && base != null) {
-        // Only CTAS and RTAS can update both metadata and snapshots at the same time.
-        // When the table exists, it will be a replace commit operation.
-        putSnapshotsForReplace(base, metadata);
-      } else if (snapshotsUpdated) {
+      if (snapshotsUpdated) {
         putSnapshots(base, metadata);
       } else if (metadataUpdated) {
         createUpdateTable(base, metadata);
@@ -152,6 +164,12 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
    * @param metadata The new metadata used for creation/update.
    */
   private void createUpdateTable(TableMetadata base, TableMetadata metadata) {
+    validateNamespace("createUpdateTable");
+    log.info(
+        "OpenHouseTableOperations#createUpdateTable invoked for {} (base null? {}, metadata location {})",
+        tableName(),
+        base == null,
+        metadata.metadataFileLocation());
     CreateUpdateTableRequestBody createUpdateTableRequestBody =
         constructMetadataRequestBody(base, metadata);
 
@@ -192,17 +210,6 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
     if (metadata.properties() != null
         && metadata.properties().containsKey(OPENHOUSE_TABLE_TYPE_KEY)) {
       createUpdateTableRequestBody.setTableType(getTableType(base, metadata));
-    }
-    // TODO: consider allowing this for any table type, not just replica tables
-    if (isMultiSchemaUpdateCommit(base, metadata)
-        && getTableType(base, metadata)
-            == CreateUpdateTableRequestBody.TableTypeEnum.REPLICA_TABLE) {
-      List<String> newIntermediateSchemas = new ArrayList<>();
-      int startSchemaId = base == null ? 0 : base.currentSchemaId() + 1;
-      for (int i = startSchemaId; i < metadata.currentSchemaId(); i++) {
-        newIntermediateSchemas.add(SchemaParser.toJson(metadata.schemasById().get(i), false));
-      }
-      createUpdateTableRequestBody.setNewIntermediateSchemas(newIntermediateSchemas);
     }
     // If base table is a replicated table, retain the property from base table
     if (base != null && base.properties().containsKey(OPENHOUSE_IS_TABLE_REPLICATED_KEY)) {
@@ -315,24 +322,22 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
         || !base.refs().equals(newMetadata.refs());
   }
 
-  protected boolean isMultiSchemaUpdateCommit(TableMetadata base, TableMetadata newMetadata) {
-    return (base == null && newMetadata.currentSchemaId() > 0)
-        || (base != null && newMetadata.currentSchemaId() > base.currentSchemaId() + 1);
-  }
-
   /**
-   * Builds an {@link IcebergSnapshotsRequestBody} from the given metadata and sends it to the
-   * snapshot API.
+   * A wrapper for a remote REST call to put snapshot.
    *
    * @param base the metadata before the snapshot was created
    * @param newMetadata metadata containing a new snapshot
-   * @param createUpdateTableRequestBody the request body for the table metadata
    */
-  private void commitSnapshots(
-      TableMetadata base,
-      TableMetadata newMetadata,
-      CreateUpdateTableRequestBody createUpdateTableRequestBody) {
+  private void putSnapshots(TableMetadata base, TableMetadata newMetadata) {
+    validateNamespace("putSnapshots");
+    log.info(
+        "OpenHouseTableOperations#putSnapshots invoked for {} (base null? {}, new snapshots count {})",
+        tableName(),
+        base == null,
+        newMetadata.snapshots() == null ? 0 : newMetadata.snapshots().size());
     IcebergSnapshotsRequestBody icebergSnapshotsRequestBody = new IcebergSnapshotsRequestBody();
+    CreateUpdateTableRequestBody createUpdateTableRequestBody =
+        constructMetadataRequestBody(base, newMetadata);
     icebergSnapshotsRequestBody.baseTableVersion(
         base == null ? INITIAL_TABLE_VERSION : base.metadataFileLocation());
     icebergSnapshotsRequestBody.jsonSnapshots(
@@ -355,31 +360,6 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
                     createUpdateTableRequestBody.getDatabaseId(),
                     createUpdateTableRequestBody.getTableId()))
         .block();
-  }
-
-  /**
-   * A wrapper for a remote REST call to put snapshot.
-   *
-   * @param base the metadata before the snapshot was created
-   * @param newMetadata metadata containing a new snapshot
-   */
-  private void putSnapshots(TableMetadata base, TableMetadata newMetadata) {
-    CreateUpdateTableRequestBody createUpdateTableRequestBody =
-        constructMetadataRequestBody(base, newMetadata);
-    commitSnapshots(base, newMetadata, createUpdateTableRequestBody);
-  }
-
-  /**
-   * A wrapper for a remote REST call to put snapshot for a replace table operation.
-   *
-   * @param base the metadata before the snapshot was created
-   * @param newMetadata metadata containing a new snapshot
-   */
-  private void putSnapshotsForReplace(TableMetadata base, TableMetadata newMetadata) {
-    CreateUpdateTableRequestBody createUpdateTableRequestBody =
-        constructMetadataRequestBody(base, newMetadata);
-    createUpdateTableRequestBody.replaceCommit(true);
-    commitSnapshots(base, newMetadata, createUpdateTableRequestBody);
   }
 
   static Mono<GetTableResponseBody> handleCreateUpdateHttpError(
@@ -427,6 +407,18 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
               e.getClass().getSimpleName()),
           e);
       return Mono.error(new CommitStateUnknownException(e));
+    }
+  }
+
+  private void validateNamespace(String context) {
+    if (tableIdentifier.namespace().levels().length > 1) {
+      log.warn(
+          "Rejecting {} for {} due to multi-level namespace: {}",
+          context,
+          tableIdentifier,
+          tableIdentifier.namespace());
+      throw new NoSuchTableException(
+          "OpenHouse catalog does not support multi-level namespaces: %s", tableIdentifier);
     }
   }
 }

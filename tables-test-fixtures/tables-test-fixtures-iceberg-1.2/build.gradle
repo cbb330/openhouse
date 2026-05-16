@@ -1,6 +1,7 @@
 plugins {
+  id 'openhouse.java-minimal-conventions'
   id 'com.github.johnrengelman.shadow' version '7.1.2'
-  id 'openhouse.tables-test-fixtures-common'
+  id 'openhouse.maven-publish'
   id 'openhouse.iceberg-conventions-1.2'
 }
 
@@ -10,16 +11,138 @@ ext {
   sparkVersion = '3.1.1'
 }
 
+configurations {
+
+  all {
+    exclude group: 'org.springframework.boot', module: 'spring-boot-starter-logging'
+  }
+  shadow.extendsFrom implementation
+}
+
 dependencies {
-  compileOnly('org.apache.spark:spark-sql_2.12:' + sparkVersion) {
+  implementation 'org.junit.jupiter:junit-jupiter-engine:' + junit_version
+  implementation 'org.springframework.boot:spring-boot-starter-test:' + spring_web_version
+  implementation(project(':services:tables')) {
+    exclude group: 'org.apache.hadoop'
+    exclude group: 'org.testcontainers'
+    exclude group: 'org.ow2.asm'
+    exclude group: 'org.xerial'
+    exclude group: 'javax'
+  }
+
+
+  compileOnly 'org.springframework.boot:spring-boot-starter-tomcat:' + spring_web_version
+  compileOnly('org.apache.spark:spark-sql_2.12:' + sparkVersion){
     // These classes are available from `client-codegen-convention.gradle`
     exclude group: "io.netty"
   }
+
+  implementation 'org.springframework.boot:spring-boot-starter-webflux:' + spring_web_version
+  implementation ('org.springframework.boot:spring-boot-starter-data-jpa:' + spring_web_version) {
+    exclude(group: 'org.springframework', module: 'spring-aspects')
+    exclude(group: 'org.springframework.boot', module: 'spring-boot-starter-aop')
+  }
+
+  implementation ('org.springframework.boot:spring-boot-starter-actuator:2.7.8') {
+    exclude(group: 'io.micrometer', module: 'micrometer-core')
+  }
+  implementation group: 'com.zaxxer', name: 'HikariCP', version: '4.0.3'
+  compileOnly('org.projectlombok:lombok:' + '1.18.20')
+  implementation (project(':cluster:storage')) {
+    exclude group: 'org.testcontainers'
+    exclude group: 'javax'
+    exclude group: 'org.xerial'
+
+  }
+  implementation project(':cluster:configs')
+  implementation (project(':iceberg:openhouse:internalcatalog')) {
+    exclude group: 'org.apache.hadoop'
+    exclude group: 'org.ow2.asm'
+    exclude group: 'org.testcontainers'
+    exclude group: 'javax'
+    exclude group: 'org.xerial'
+    exclude group: 'com.h2database'
+    exclude group: 'io.micrometer'
+  }
+  implementation (project(':integrations:java:iceberg-1.2:openhouse-java-runtime')) {
+    exclude group: 'org.apache.iceberg'
+  }
+  implementation (project(path: ':integrations:spark:spark-3.1:openhouse-spark-runtime_2.12', configuration: 'shadow')) {
+    exclude group: 'org.apache.iceberg'
+    exclude group: 'org.apache.spark'
+  }
+  implementation (project(':client:tableclient')) {
+    exclude group: 'io.netty'
+    exclude group: 'org.apache.hadoop'
+    exclude group: 'org.testcontainers'
+    exclude group: 'org.ow2.asm'
+    exclude group: 'javax'
+  }
+  implementation (project(':client:hts')) {
+    exclude group: 'io.netty'
+    exclude group: 'org.apache.hadoop'
+    exclude group: 'org.testcontainers'
+    exclude group: 'org.ow2.asm'
+    exclude group: 'javax'
+  }
+  implementation (project(':client:secureclient')) {
+    exclude group: 'io.netty'
+    exclude group: 'org.apache.hadoop'
+    exclude group: 'org.testcontainers'
+    exclude group: 'org.ow2.asm'
+    exclude group: 'javax'
+  }
+  implementation (project(':client:common')) {
+    exclude group: 'io.netty'
+    exclude group: 'org.apache.hadoop'
+    exclude group: 'org.testcontainers'
+    exclude group: 'org.ow2.asm'
+    exclude group: 'javax'
+  }
+  implementation project(':services:common')
+  implementation files(project(':services:common').sourceSets.main.output)
+  testImplementation('org.apache.hadoop:hadoop-common:3.2.0'){
+    transitive = false
+    exclude group: "io.netty"
+  }
+  testRuntimeOnly("org.eclipse.jetty:jetty-server:11.0.2")
 }
 
 shadowJar {
+  zip64  true
+  duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+  archiveClassifier.set('uber')
+
+  mergeServiceFiles()
+
+  append 'META-INF/spring.handlers'
+  append 'META-INF/spring.schemas'
+  append 'META-INF/spring.tooling'
   transform(PropertiesFileTransformer) {
     paths = ['META-INF/spring.factories' ]
     mergeStrategy = "merge"
+  }
+
+  dependencies {
+    exclude(dependency('org.apache.hadoop::'))
+    exclude(dependency('org.apache.logging.log4j::'))
+    exclude(dependency('org.slf4j::'))
+    exclude(dependency('org.log4j::'))
+    exclude(dependency('org.apache.log4j::'))
+    exclude(dependency('org.apache.spark::'))
+    exclude(dependency('org.apache.iceberg::'))
+    exclude 'com/fasterxml/**'
+  }
+
+}
+
+// https://github.com/johnrengelman/shadow/issues/335
+// By default shadow doesn't configure the build task to depend on the shadowJar task.
+tasks.build.dependsOn tasks.shadowJar
+
+test {
+  if (JavaVersion.current() >= JavaVersion.VERSION_1_9){
+    jvmArgs '--add-opens=java.base/java.net=ALL-UNNAMED'
   }
 }

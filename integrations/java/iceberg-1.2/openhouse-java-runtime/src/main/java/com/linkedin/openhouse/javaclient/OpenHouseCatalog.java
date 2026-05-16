@@ -276,6 +276,10 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
 
   @Override
   public TableOperations newTableOps(TableIdentifier tableIdentifier) {
+    if (tableIdentifier.namespace().levels().length > 1) {
+      throw new NoSuchTableException(
+          "OpenHouse catalog does not support multi-level namespaces: %s", tableIdentifier);
+    }
     return OpenHouseTableOperations.builder()
         .tableIdentifier(tableIdentifier)
         .fileIO(fileIO)
@@ -283,11 +287,6 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
         .snapshotApi(snapshotApi)
         .cluster(cluster)
         .build();
-  }
-
-  @Override
-  protected boolean isValidIdentifier(TableIdentifier tableIdentifier) {
-    return tableIdentifier != null && tableIdentifier.namespace().levels().length == 1;
   }
 
   /**
@@ -303,6 +302,15 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
   @Override
   protected String defaultWarehouseLocation(TableIdentifier tableIdentifier) {
     return null;
+  }
+
+  @Override
+  public org.apache.iceberg.Table createTable(
+      TableIdentifier ident,
+      org.apache.iceberg.Schema schema,
+      PartitionSpec spec,
+      Map<String, String> properties) {
+    return super.createTable(ident, schema, spec, properties);
   }
 
   /**
@@ -374,7 +382,10 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
   @Override
   public Map<String, String> loadNamespaceMetadata(Namespace namespace)
       throws NoSuchNamespaceException, UnsupportedOperationException {
-    throw new UnsupportedOperationException("Describing database is not supported");
+    if (namespaceExists(namespace)) {
+      return Collections.emptyMap();
+    }
+    throw new NoSuchNamespaceException("Namespace does not exist: " + namespace);
   }
 
   @Override
@@ -397,7 +408,7 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
 
   @Override
   public boolean namespaceExists(Namespace namespace) throws NoSuchNamespaceException {
-    throw new UnsupportedOperationException("Checking if database exists is not supported");
+    return listNamespaces().contains(namespace);
   }
 
   @Override
@@ -589,34 +600,16 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
       return this;
     }
 
-    /**
-     * Start a transaction to create or replace a table. If table does not exist the method will
-     * stage create the table. If the table exists, it will stage replace the table. The table will
-     * be live and queryable for use only after transaction has been committed.
-     */
     @Override
     public Transaction createOrReplaceTransaction() {
-      TableOperations ops = newTableOps(this.identifier);
-      if (ops.current() == null) {
-        return createTransaction();
-      } else {
-        return replaceTransaction();
-      }
+      throw new UnsupportedOperationException(
+          "Replace table is not supported for OpenHouse tables");
     }
 
-    /**
-     * Start a transaction to replace an existing table. The method will stage replace the table
-     * with schema and partition evolution checks bypassed. The table will be live and queryable for
-     * use only after transaction has been committed.
-     */
     @Override
     public Transaction replaceTransaction() {
-      TableOperations ops = newTableOps(this.identifier);
-      if (ops.current() == null) {
-        throw new NoSuchTableException("Table does not exist: %s", new Object[] {this.identifier});
-      }
-      TableMetadata metadata = replaceStagedMetadata(ops);
-      return Transactions.replaceTableTransaction(this.identifier.toString(), ops, metadata);
+      throw new UnsupportedOperationException(
+          "Replace table is not supported for OpenHouse tables");
     }
 
     /**
@@ -651,37 +644,6 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
           ClusteringSpecBuilder.builderFor(schema, spec).build());
       createUpdateTableRequestBody.setTableProperties(propertiesBuilder.build());
       createUpdateTableRequestBody.setSortOrder(SortOrderParser.toJson(sortOrder));
-      String tableLocation =
-          tableApi
-              .createTableV1(identifier.namespace().toString(), createUpdateTableRequestBody)
-              .onErrorResume(
-                  e ->
-                      handleCreateUpdateHttpError(
-                          e,
-                          createUpdateTableRequestBody.getDatabaseId(),
-                          createUpdateTableRequestBody.getTableId()))
-              .mapNotNull(GetTableResponseBody::getTableLocation)
-              .block();
-      return new StaticTableOperations(tableLocation, fileIO).refresh();
-    }
-
-    private TableMetadata replaceStagedMetadata(TableOperations ops) {
-      CreateUpdateTableRequestBody createUpdateTableRequestBody =
-          new CreateUpdateTableRequestBody();
-      createUpdateTableRequestBody.setTableId(identifier.name());
-      createUpdateTableRequestBody.setDatabaseId(identifier.namespace().toString());
-      createUpdateTableRequestBody.setClusterId(cluster);
-      createUpdateTableRequestBody.setBaseTableVersion(ops.current().metadataFileLocation());
-      createUpdateTableRequestBody.setSchema(SchemaParser.toJson(schema, false));
-      createUpdateTableRequestBody.setTimePartitioning(
-          TimePartitionSpecBuilder.builderFor(schema, spec).build());
-      createUpdateTableRequestBody.setClustering(
-          ClusteringSpecBuilder.builderFor(schema, spec).build());
-      createUpdateTableRequestBody.setTableProperties(propertiesBuilder.build());
-      createUpdateTableRequestBody.setSortOrder(SortOrderParser.toJson(sortOrder));
-      createUpdateTableRequestBody.setStageReplace(
-          true); // indicate this is a replace table operation
-
       String tableLocation =
           tableApi
               .createTableV1(identifier.namespace().toString(), createUpdateTableRequestBody)

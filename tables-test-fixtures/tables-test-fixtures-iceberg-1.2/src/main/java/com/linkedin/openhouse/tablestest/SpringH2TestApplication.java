@@ -1,9 +1,10 @@
 package com.linkedin.openhouse.tablestest;
 
-import java.util.function.Consumer;
-import java.util.function.Supplier;
-import org.apache.hadoop.fs.Path;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.springframework.boot.SpringApplication;
+import org.springframework.boot.actuate.autoconfigure.metrics.MetricsAutoConfiguration;
+import org.springframework.boot.actuate.autoconfigure.metrics.export.simple.SimpleMetricsExportAutoConfiguration;
 import org.springframework.boot.actuate.autoconfigure.security.servlet.ManagementWebSecurityAutoConfiguration;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -11,7 +12,6 @@ import org.springframework.boot.autoconfigure.domain.EntityScan;
 import org.springframework.boot.autoconfigure.security.servlet.SecurityAutoConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.ComponentScan;
-import org.springframework.context.annotation.Primary;
 
 @SpringBootApplication
 @ComponentScan(
@@ -41,7 +41,12 @@ import org.springframework.context.annotation.Primary;
       "com.linkedin.openhouse.internal.catalog.model"
     })
 @EnableAutoConfiguration(
-    exclude = {SecurityAutoConfiguration.class, ManagementWebSecurityAutoConfiguration.class})
+    exclude = {
+      SecurityAutoConfiguration.class,
+      ManagementWebSecurityAutoConfiguration.class,
+      MetricsAutoConfiguration.class,
+      SimpleMetricsExportAutoConfiguration.class
+    })
 public class SpringH2TestApplication {
 
   public static void main(String[] args) {
@@ -49,15 +54,12 @@ public class SpringH2TestApplication {
   }
 
   /**
-   * File secure used for testing purpose. We cannot directly use the actual
-   * SnapshotInspector#fileSecurer as that changes file to a user group that is not guaranteed to
-   * exist across different platforms thus creating environment dependencies for unit tests.
+   * Provide a simple MeterRegistry bean for testing. This avoids the HikariCP/Micrometer version
+   * conflict while still satisfying the @Autowired MeterRegistry dependency in
+   * OpenHouseInternalCatalog.
    */
   @Bean
-  @Primary
-  Consumer<Supplier<Path>> provideTestFileSecurer() {
-    return pathSupplier -> {
-      // This is a no-op Consumer. It does nothing with the supplied Path.
-    };
+  public MeterRegistry meterRegistry() {
+    return new SimpleMeterRegistry();
   }
 }

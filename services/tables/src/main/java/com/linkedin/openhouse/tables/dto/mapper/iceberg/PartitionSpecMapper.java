@@ -40,8 +40,8 @@ public class PartitionSpecMapper {
           new HashSet<Type.TypeID>(
               Arrays.asList(
                   Type.TypeID.STRING, Type.TypeID.INTEGER, Type.TypeID.LONG, Type.TypeID.DATE)));
-  private static final String TRUNCATE_REGEX = "truncate\\[(\\d+)\\]";
-  private static final String BUCKET_REGEX = "bucket\\[(\\d+)\\]";
+  private static final String TRUNCATE_REGEX = "truncate\\[\\s*(\\d+)\\s*\\]";
+  private static final String BUCKET_REGEX = "bucket\\[\\s*(\\d+)\\s*\\]";
   private static final Set<String> SUPPORTED_TRANSFORMS =
       Collections.unmodifiableSet(
           new HashSet<>(Arrays.asList("identity", TRUNCATE_REGEX, BUCKET_REGEX)));
@@ -98,7 +98,7 @@ public class PartitionSpecMapper {
         return;
       }
     } else if (ALLOWED_CLUSTERING_TYPEIDS.contains(typeID)) {
-      String transform = partitionField.transform().toString();
+      String transform = partitionField.transform().toString().trim();
       if (SUPPORTED_TRANSFORMS.stream().anyMatch(pattern -> transform.matches(pattern))) {
         return;
       }
@@ -247,7 +247,7 @@ public class PartitionSpecMapper {
   private Optional<TimePartitionSpec.Granularity> toGranularity(PartitionField partitionField) {
     /* String based comparison is necessary as the classes are package-private */
     TimePartitionSpec.Granularity granularity = null;
-    switch (partitionField.transform().toString()) {
+    switch (partitionField.transform().toString().trim()) {
       case "year":
         granularity = TimePartitionSpec.Granularity.YEAR;
         break;
@@ -275,7 +275,7 @@ public class PartitionSpecMapper {
    */
   private Optional<Transform> toTransform(PartitionField partitionField) {
     /* String based comparison is necessary as the classes are package-private */
-    String icebergTransform = partitionField.transform().toString();
+    String icebergTransform = partitionField.transform().toString().trim();
 
     String truncateParam = extractTransformParameter(icebergTransform, TRUNCATE_REGEX);
     if (truncateParam != null) {

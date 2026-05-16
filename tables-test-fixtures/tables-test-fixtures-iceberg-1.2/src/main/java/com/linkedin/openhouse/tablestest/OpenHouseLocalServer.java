@@ -17,7 +17,6 @@ public class OpenHouseLocalServer {
   private int port;
   private ConfigurableApplicationContext appContext;
 
-  /** Create server with OS-assigned port (determined at startup time). */
   public OpenHouseLocalServer() {
     this.port = 0;
     this.appContext = null;
@@ -37,13 +36,28 @@ public class OpenHouseLocalServer {
   public synchronized void start(boolean applyTomcatFix) {
     if (appContext == null || !appContext.isActive()) {
       SpringApplication application = new SpringApplication(SpringH2TestApplication.class);
+      // if port is 0, let Spring Boot pick a random available port by not setting server.port or
+      // setting it to 0
+      // We only need to set server.port if a specific port is requested.
+      // However, TestSocketUtils.findAvailableTcpPort() finds an available port but doesn't reserve
+      // it, leading to race conditions.
+      // Better to let Spring Boot handle ephemeral ports by using port 0.
       application.setDefaultProperties(
           Collections.singletonMap("server.port", String.valueOf(port)));
       if (applyTomcatFix) {
         fixTomcatInstantiation();
       }
       appContext = application.run();
-      this.port = ((WebServerApplicationContext) appContext).getWebServer().getPort();
+      if (port == 0) {
+        if (appContext instanceof WebServerApplicationContext) {
+          this.port = ((WebServerApplicationContext) appContext).getWebServer().getPort();
+        } else {
+          this.port =
+              appContext
+                  .getEnvironment()
+                  .getProperty("local.server.port", Integer.class, this.port);
+        }
+      }
     } else {
       throw new IllegalArgumentException(
           "OpenHouse test server has already been started, please stop the application first with OpenHouseJavaItestService#Start");

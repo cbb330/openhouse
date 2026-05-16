@@ -4,7 +4,6 @@ import static com.linkedin.openhouse.internal.catalog.CatalogConstants.*;
 import static com.linkedin.openhouse.internal.catalog.mapper.HouseTableSerdeUtils.*;
 import static com.linkedin.openhouse.tables.repository.impl.InternalRepositoryUtils.*;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Maps;
 import com.google.gson.GsonBuilder;
@@ -34,7 +33,6 @@ import com.linkedin.openhouse.tables.repository.OpenHouseInternalRepository;
 import com.linkedin.openhouse.tables.repository.PreservedKeyChecker;
 import com.linkedin.openhouse.tables.repository.SchemaValidator;
 import io.micrometer.core.instrument.MeterRegistry;
-import io.opentelemetry.instrumentation.annotations.WithSpan;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -42,8 +40,6 @@ import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.collections.MapUtils;
-import org.apache.iceberg.BaseTable;
-import org.apache.iceberg.BaseTransaction;
 import org.apache.iceberg.PartitionField;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
@@ -51,7 +47,6 @@ import org.apache.iceberg.SchemaParser;
 import org.apache.iceberg.SortOrder;
 import org.apache.iceberg.SortOrderParser;
 import org.apache.iceberg.Table;
-import org.apache.iceberg.TableOperations;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.Transaction;
 import org.apache.iceberg.UpdateProperties;
@@ -81,9 +76,7 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
 
   @Autowired TablesMapper mapper;
 
-  @Autowired private PoliciesSpecMapper policiesMapper;
-
-  @Autowired private TablePolicyManager tablePolicyManager;
+  @Autowired PoliciesSpecMapper policiesMapper;
 
   @Autowired PartitionSpecMapper partitionSpecMapper;
 
@@ -103,7 +96,6 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
 
   @Autowired PreservedKeyChecker preservedKeyChecker;
 
-  @WithSpan("InternalRepository.save")
   @Timed(metricKey = MetricsConstant.REPO_TABLE_SAVE_TIME)
   @Override
   public TableDto save(TableDto tableDto) {
@@ -127,7 +119,6 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
           writeSchema,
           partitionSpec);
       Map<String, String> tableProps = computePropsForTableCreation(tableDto);
-      tablePolicyManager.managePoliciesOnCreateIfNeeded(tableDto);
       String tableLocation =
           storageSelector
               .selectStorage(tableDto.getDatabaseId(), tableDto.getTableId())
@@ -146,25 +137,6 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
           "create for table {} took {} ms",
           tableIdentifier,
           System.currentTimeMillis() - startTime);
-    } else if (tableDto.isStageReplace() || tableDto.isReplaceCommit()) {
-      PartitionSpec partitionSpec = partitionSpecMapper.toPartitionSpec(tableDto);
-      log.info(
-          "Replacing a user table: {} with schema: {} and partitionSpec: {}",
-          tableIdentifier,
-          writeSchema,
-          partitionSpec);
-      Map<String, String> tableProps = computePropsForTableCreation(tableDto);
-      tablePolicyManager.managePoliciesOnCreateIfNeeded(tableDto);
-      SortOrder sortOrder = getIcebergSortOrder(tableDto, writeSchema);
-      String tableLocation =
-          tableDto.getTableVersion().substring(0, tableDto.getTableVersion().lastIndexOf("/"));
-      table =
-          replaceTable(
-              tableIdentifier, writeSchema, partitionSpec, tableLocation, tableProps, sortOrder);
-      log.info(
-          "replace for table {} took {} ms",
-          tableIdentifier,
-          System.currentTimeMillis() - startTime);
     } else {
       table = catalog.loadTable(tableIdentifier);
       Transaction transaction = table.newTransaction();
@@ -176,25 +148,15 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
       boolean propsUpdated = doUpdateUserPropsIfNeeded(updateProperties, tableDto, table);
       boolean snapshotsUpdated = doUpdateSnapshotsIfNeeded(updateProperties, tableDto);
       boolean policiesUpdated =
-          tablePolicyManager.managePoliciesOnUpdateIfNeeded(
-              updateProperties, tableDto, table.properties());
+          doUpdatePoliciesIfNeeded(updateProperties, tableDto, table.properties());
       boolean sortOrderUpdated =
           doUpdateSortOrderIfNeeded(updateProperties, tableDto, table, writeSchema);
+
       // TODO remove tableTypeAdded after all existing tables have been back-filled to have a
       // tableType
       boolean tableTypeAdded = checkIfTableTypeAdded(updateProperties, table.properties());
-      updateProperties.set(COMMIT_KEY, tableDto.getTableVersion()).commit();
-      // this relies on forked iceberg-core to use this property for building the base transaction
-      // retryer
-      // default iceberg behavior will use the hdfs base metadata to derive the base transaction
-      // retryer
-      String desiredCommitRetries =
-          tableDto.getTableProperties() != null
-                  && tableDto.getTableProperties().containsKey(TableProperties.COMMIT_NUM_RETRIES)
-              ? tableDto.getTableProperties().get(TableProperties.COMMIT_NUM_RETRIES)
-              : table.properties().get(TableProperties.COMMIT_NUM_RETRIES);
-      overrideProperty(
-          updateProperties, desiredCommitRetries, TableProperties.COMMIT_NUM_RETRIES, "0");
+      updateProperties.set(COMMIT_KEY, tableDto.getTableVersion());
+      updateProperties.commit();
 
       // No new metadata.json shall be generated if nothing changed.
       if (schemaUpdated
@@ -229,31 +191,6 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
         .withProperties(tableProps)
         .withSortOrder(sortOrder)
         .create();
-  }
-
-  protected Table replaceTable(
-      TableIdentifier tableIdentifier,
-      Schema writeSchema,
-      PartitionSpec partitionSpec,
-      String tableLocation,
-      Map<String, String> tableProps,
-      SortOrder sortOrder) {
-    BaseTransaction txn =
-        (BaseTransaction)
-            catalog
-                .buildTable(tableIdentifier, writeSchema)
-                .withPartitionSpec(partitionSpec)
-                .withLocation(tableLocation)
-                .withProperties(tableProps)
-                .withSortOrder(sortOrder)
-                .replaceTransaction();
-    txn.commitTransaction();
-    // The transaction's table would refresh metadata from HTS on access, returning stale metadata.
-    // Instead, use underlyingOps which has refresh disabled after commit and still holds the
-    // newly committed metadata.
-    TableOperations ops = txn.underlyingOps();
-    String fullname = "openhouse." + tableIdentifier.namespace() + "." + tableIdentifier.name();
-    return new BaseTable(ops, fullname);
   }
 
   private boolean doUpdateSortOrderIfNeeded(
@@ -314,7 +251,6 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
    * Check the eligibility of table updates. Throw exceptions when invalidate behaviors detected for
    * {@link com.linkedin.openhouse.common.exception.handler.OpenHouseExceptionHandler} to deal with
    */
-  @WithSpan("InternalRepository.updateEligibilityCheck")
   protected void updateEligibilityCheck(Table existingTable, TableDto tableDto) {
     if (!skipEligibilityCheck(existingTable.properties(), tableDto.getTableProperties())) {
       // eligibility check is relaxed for request from replication flow since preserved properties
@@ -409,8 +345,7 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
    * @param tableDto
    * @return
    */
-  @VisibleForTesting
-  Map<String, String> computePropsForTableCreation(TableDto tableDto) {
+  private Map<String, String> computePropsForTableCreation(TableDto tableDto) {
     // Populate non-preserved keys, mainly user defined properties.
     Map<String, String> propertiesMap =
         tableDto.getTableProperties().entrySet().stream()
@@ -429,12 +364,7 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
     Map<String, String> dtoMap = tableDto.convertToMap();
     for (String htsFieldName : HTS_FIELD_NAMES) {
       if (dtoMap.get(htsFieldName) != null) {
-        if (htsFieldName.equals("tableLocation")) {
-          propertiesMap.put(
-              getCanonicalFieldName(htsFieldName), getSchemeLessPath(dtoMap.get(htsFieldName)));
-        } else {
-          propertiesMap.put(getCanonicalFieldName(htsFieldName), dtoMap.get(htsFieldName));
-        }
+        propertiesMap.put(getCanonicalFieldName(htsFieldName), dtoMap.get(htsFieldName));
       }
     }
 
@@ -450,11 +380,6 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
         propertiesMap.put(
             SNAPSHOTS_REFS_KEY, SnapshotsUtil.serializeMap(tableDto.getSnapshotRefs()));
       }
-    }
-    if (!CollectionUtils.isEmpty(tableDto.getNewIntermediateSchemas())) {
-      propertiesMap.put(
-          INTERMEDIATE_SCHEMAS_KEY,
-          new GsonBuilder().create().toJson(tableDto.getNewIntermediateSchemas()));
     }
     if (tableDto.getTableType() != null) {
       propertiesMap.put(getCanonicalFieldName(TABLE_TYPE_KEY), tableDto.getTableType().toString());
@@ -473,29 +398,13 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
       propertiesMap.put(IS_STAGE_CREATE_KEY, String.valueOf(tableDto.isStageCreate()));
     }
 
-    if (tableDto.isStageReplace()) {
-      meterRegistry.counter(MetricsConstant.REPO_TABLE_REPLACED_CTR_STAGED).increment();
-      propertiesMap.put(IS_STAGE_REPLACE_KEY, String.valueOf(tableDto.isStageReplace()));
-    }
-
     propertiesMap.put(
         TableProperties.METADATA_DELETE_AFTER_COMMIT_ENABLED,
         Boolean.toString(
             clusterProperties.isClusterIcebergWriteMetadataDeleteAfterCommitEnabled()));
-    if (!propertiesMap.containsKey(TableProperties.METADATA_PREVIOUS_VERSIONS_MAX)) {
-      propertiesMap.put(
-          TableProperties.METADATA_PREVIOUS_VERSIONS_MAX,
-          Integer.toString(clusterProperties.getClusterIcebergWriteMetadataPreviousVersionsMax()));
-      log.info(
-          "Setting the table property: {} to default value: {}.",
-          TableProperties.METADATA_PREVIOUS_VERSIONS_MAX,
-          Integer.toString(clusterProperties.getClusterIcebergWriteMetadataPreviousVersionsMax()));
-    } else {
-      log.info(
-          "Using the value: {} for table property: {}.",
-          propertiesMap.get(TableProperties.METADATA_PREVIOUS_VERSIONS_MAX),
-          TableProperties.METADATA_PREVIOUS_VERSIONS_MAX);
-    }
+    propertiesMap.put(
+        TableProperties.METADATA_PREVIOUS_VERSIONS_MAX,
+        Integer.toString(clusterProperties.getClusterIcebergWriteMetadataPreviousVersionsMax()));
     propertiesMap.put(
         TableProperties.FORMAT_VERSION,
         Integer.toString(clusterProperties.getClusterIcebergFormatVersion()));
@@ -525,19 +434,9 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
       Schema tableSchema,
       TableDto tableDto,
       UpdateProperties updateProperties) {
-    // Normalize top-level column names in writeSchema to use the casing already present in
-    // tableSchema (matched by Iceberg field ID). This enables case-insensitive writes: a writer
-    // that submits "id" for a table column named "ID" will have its schema normalized to "ID"
-    // before any comparison or storage, so the table's existing casing is never changed.
-    // Tables where two columns share a case-folded name are excluded (ambiguous target column).
-    if (!SchemaValidationUtil.hasDuplicateCaseInsensitiveColumnNames(tableSchema)) {
-      writeSchema =
-          BaseIcebergSchemaValidator.normalizeSchemaCasingToTable(writeSchema, tableSchema);
-    }
     if (!writeSchema.sameSchema(tableSchema)) {
       try {
         schemaValidator.validateWriteSchema(tableSchema, writeSchema, tableDto.getTableUri());
-        doSetNewIntermediateSchemasIfNeeded(updateProperties, tableDto);
         updateProperties.set(CatalogConstants.EVOLVED_SCHEMA_KEY, SchemaParser.toJson(writeSchema));
         return true;
       } catch (Exception e) {
@@ -588,25 +487,29 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
   }
 
   /**
-   * Sets intermediate schemas in table properties if they are provided in the TableDto.
-   * Intermediate schemas are used during replication when multiple schema updates occur in a single
-   * commit, allowing the full schema evolution history to be preserved.
-   *
-   * @param updateProperties The properties to update
-   * @param tableDto The table DTO containing potential intermediate schemas
+   * @param updateProperties
+   * @param tableDto
+   * @param existingTableProps
+   * @return Whether there are any policies-updates actually materialized in properties.
    */
-  private void doSetNewIntermediateSchemasIfNeeded(
-      UpdateProperties updateProperties, TableDto tableDto) {
-    if (CollectionUtils.isNotEmpty(tableDto.getNewIntermediateSchemas())) {
-      updateProperties.set(
-          INTERMEDIATE_SCHEMAS_KEY,
-          new GsonBuilder().create().toJson(tableDto.getNewIntermediateSchemas()));
-      log.info(
-          "Setting {} intermediate schemas for table {}.{}",
-          tableDto.getNewIntermediateSchemas().size(),
-          tableDto.getDatabaseId(),
-          tableDto.getTableId());
+  private boolean doUpdatePoliciesIfNeeded(
+      UpdateProperties updateProperties,
+      TableDto tableDto,
+      Map<String, String> existingTableProps) {
+    boolean policiesUpdated;
+    String tableDtoPolicyString = policiesMapper.toPoliciesJsonString(tableDto);
+
+    if (!existingTableProps.containsKey(InternalRepositoryUtils.POLICIES_KEY)) {
+      updateProperties.set(InternalRepositoryUtils.POLICIES_KEY, tableDtoPolicyString);
+      policiesUpdated = true;
+    } else {
+      String policiesJsonString = existingTableProps.get(InternalRepositoryUtils.POLICIES_KEY);
+      policiesUpdated =
+          InternalRepositoryUtils.alterPoliciesIfNeeded(
+              updateProperties, tableDtoPolicyString, policiesJsonString);
     }
+
+    return policiesUpdated;
   }
 
   /**
@@ -625,39 +528,6 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
       tableTypeAdded = true;
     }
     return tableTypeAdded;
-  }
-
-  private void overrideProperty(
-      UpdateProperties updateProperties,
-      String desiredFinalValue,
-      String propertyKey,
-      String overrideValue) {
-    if (desiredFinalValue != null) {
-      String desiredFinalValueForLog =
-          desiredFinalValue.length() > 256
-              ? desiredFinalValue.substring(0, 256) + "...(truncated)"
-              : desiredFinalValue;
-      log.info(
-          "overrideProperty: stashing desiredFinalValue for {} into {}{} (desiredFinalValue={}), then overriding {} -> {}",
-          propertyKey,
-          CatalogConstants.TRANSIENT_RESTORE_PREFIX,
-          propertyKey,
-          desiredFinalValueForLog,
-          propertyKey,
-          overrideValue);
-      updateProperties.set(
-          CatalogConstants.TRANSIENT_RESTORE_PREFIX + propertyKey, desiredFinalValue);
-    } else {
-      log.info(
-          "overrideProperty: desiredFinalValue is null for {}; setting {}{} as transient-added marker, then overriding {} -> {}",
-          propertyKey,
-          CatalogConstants.TRANSIENT_ADDED_PREFIX,
-          propertyKey,
-          propertyKey,
-          overrideValue);
-      updateProperties.set(CatalogConstants.TRANSIENT_ADDED_PREFIX + propertyKey, "");
-    }
-    updateProperties.set(propertyKey, overrideValue).commit();
   }
 
   @Timed(metricKey = MetricsConstant.REPO_TABLE_FIND_TIME)
@@ -850,6 +720,22 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
   private UnsupportedOperationException getUnsupportedException() {
     return new UnsupportedOperationException(
         "Only save, findById, existsById supported for OpenHouseCatalog");
+  }
+
+  private boolean areSpecsDifferent(PartitionSpec s1, PartitionSpec s2) {
+    if (s1.fields().size() != s2.fields().size()) {
+      return true;
+    }
+    for (int i = 0; i < s1.fields().size(); i++) {
+      PartitionField f1 = s1.fields().get(i);
+      PartitionField f2 = s2.fields().get(i);
+      if (!f1.name().equals(f2.name())
+          || !f1.transform().toString().equals(f2.transform().toString())
+          || f1.sourceId() != f2.sourceId()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private Boolean arePartitionColumnNamesSame(PartitionSpec before, PartitionSpec newSpec) {
