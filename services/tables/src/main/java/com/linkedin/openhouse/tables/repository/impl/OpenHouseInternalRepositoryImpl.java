@@ -24,6 +24,7 @@ import com.linkedin.openhouse.internal.catalog.SnapshotsUtil;
 import com.linkedin.openhouse.internal.catalog.fileio.FileIOManager;
 import com.linkedin.openhouse.internal.catalog.model.SoftDeletedTableDto;
 import com.linkedin.openhouse.internal.catalog.model.SoftDeletedTablePrimaryKey;
+import com.linkedin.openhouse.tables.api.WapBranch;
 import com.linkedin.openhouse.tables.api.spec.v0.request.components.Policies;
 import com.linkedin.openhouse.tables.common.TableType;
 import com.linkedin.openhouse.tables.dto.mapper.TablesMapper;
@@ -41,6 +42,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -180,16 +182,33 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
       Transaction transaction = table.newTransaction();
       updateEligibilityCheck(table, tableDto);
 
+      boolean dropDefinition = WapBranch.isNonMain(WapBranch.fromRequest());
+      if (dropDefinition) {
+        log.info(
+            "Skipping schema/property/policy/sort updates for non-main branch {} on {}",
+            WapBranch.fromRequest(),
+            tableIdentifier);
+      }
+
       UpdateProperties updateProperties = transaction.updateProperties();
       boolean schemaUpdated =
-          doUpdateSchemaIfNeeded(writeSchema, table.schema(), tableDto, updateProperties);
-      boolean propsUpdated = doUpdateUserPropsIfNeeded(updateProperties, tableDto, table);
+          dropDefinition
+              ? false
+              : doUpdateSchemaIfNeeded(writeSchema, table.schema(), tableDto, updateProperties);
+      boolean propsUpdated =
+          dropDefinition
+              ? doUpdateWapEnabledIfNeeded(updateProperties, tableDto, table)
+              : doUpdateUserPropsIfNeeded(updateProperties, tableDto, table);
       boolean snapshotsUpdated = doUpdateSnapshotsIfNeeded(updateProperties, tableDto);
       boolean policiesUpdated =
-          tablePolicyManager.managePoliciesOnUpdateIfNeeded(
-              updateProperties, tableDto, table.properties());
+          dropDefinition
+              ? false
+              : tablePolicyManager.managePoliciesOnUpdateIfNeeded(
+                  updateProperties, tableDto, table.properties());
       boolean sortOrderUpdated =
-          doUpdateSortOrderIfNeeded(updateProperties, tableDto, table, writeSchema);
+          dropDefinition
+              ? false
+              : doUpdateSortOrderIfNeeded(updateProperties, tableDto, table, writeSchema);
       // TODO remove tableTypeAdded after all existing tables have been back-filled to have a
       // tableType
       boolean tableTypeAdded = checkIfTableTypeAdded(updateProperties, table.properties());
@@ -671,6 +690,27 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
     } else {
       return false;
     }
+  }
+
+  /**
+   * Iceberg WAP must still land on the table until clone replaces it. Other user properties are
+   * skipped when the request names a non-main branch.
+   */
+  private boolean doUpdateWapEnabledIfNeeded(
+      UpdateProperties updateProperties, TableDto providedTableDto, Table existingTable) {
+    if (providedTableDto.getTableProperties() == null) {
+      return false;
+    }
+    String desired = providedTableDto.getTableProperties().get(WAP_ENABLED_TABLE_PROP);
+    if (desired == null) {
+      return false;
+    }
+    String existing = existingTable.properties().get(WAP_ENABLED_TABLE_PROP);
+    if (Objects.equals(desired, existing)) {
+      return false;
+    }
+    updateProperties.set(WAP_ENABLED_TABLE_PROP, desired);
+    return true;
   }
 
   /**

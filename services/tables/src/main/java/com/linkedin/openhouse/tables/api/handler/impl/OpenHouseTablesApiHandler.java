@@ -2,6 +2,7 @@ package com.linkedin.openhouse.tables.api.handler.impl;
 
 import com.linkedin.openhouse.cluster.configs.ClusterProperties;
 import com.linkedin.openhouse.common.api.spec.ApiResponse;
+import com.linkedin.openhouse.tables.api.WapBranch;
 import com.linkedin.openhouse.tables.api.handler.TablesApiHandler;
 import com.linkedin.openhouse.tables.api.spec.v0.request.CreateUpdateLockRequestBody;
 import com.linkedin.openhouse.tables.api.spec.v0.request.CreateUpdateTableRequestBody;
@@ -17,6 +18,8 @@ import com.linkedin.openhouse.tables.readbridge.ReadBridgeConfigResolver;
 import com.linkedin.openhouse.tables.services.TablesService;
 import java.util.List;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.util.Pair;
 import org.springframework.http.HttpStatus;
@@ -27,6 +30,7 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class OpenHouseTablesApiHandler implements TablesApiHandler {
+  private static final Logger log = LoggerFactory.getLogger(OpenHouseTablesApiHandler.class);
 
   @Autowired private TablesApiValidator tablesApiValidator;
 
@@ -126,6 +130,9 @@ public class OpenHouseTablesApiHandler implements TablesApiHandler {
 
   @Override
   public ApiResponse<Void> deleteTable(String databaseId, String tableId, String actingPrincipal) {
+    if (dropIfBranched("deleteTable")) {
+      return ApiResponse.<Void>builder().httpStatus(HttpStatus.NO_CONTENT).build();
+    }
     tablesApiValidator.validateDeleteTable(databaseId, tableId);
     tableService.deleteTable(databaseId, tableId, actingPrincipal);
     return ApiResponse.<Void>builder().httpStatus(HttpStatus.NO_CONTENT).build();
@@ -138,6 +145,9 @@ public class OpenHouseTablesApiHandler implements TablesApiHandler {
       String toDatabaseId,
       String toTableId,
       String actingPrincipal) {
+    if (dropIfBranched("renameTable")) {
+      return ApiResponse.<Void>builder().httpStatus(HttpStatus.NO_CONTENT).build();
+    }
     tablesApiValidator.validateRenameTable(fromDatabaseId, fromTableId, toDatabaseId, toTableId);
     tableService.renameTable(fromDatabaseId, fromTableId, toDatabaseId, toTableId, actingPrincipal);
     return ApiResponse.<Void>builder().httpStatus(HttpStatus.NO_CONTENT).build();
@@ -149,6 +159,14 @@ public class OpenHouseTablesApiHandler implements TablesApiHandler {
       String tableId,
       UpdateAclPoliciesRequestBody updateAclPoliciesRequestBody,
       String actingPrincipal) {
+    if (WapBranch.shouldDrop(
+        WapBranch.fromRequest(), WapBranch.fromAcl(updateAclPoliciesRequestBody))) {
+      log.info(
+          "Dropping updateAclPolicies for non-main branch header={} body={}",
+          WapBranch.fromRequest(),
+          WapBranch.fromAcl(updateAclPoliciesRequestBody));
+      return ApiResponse.<Void>builder().httpStatus(HttpStatus.NO_CONTENT).build();
+    }
     tablesApiValidator.validateUpdateAclPolicies(databaseId, tableId, updateAclPoliciesRequestBody);
     tableService.updateAclPolicies(
         databaseId, tableId, updateAclPoliciesRequestBody, actingPrincipal);
@@ -192,6 +210,9 @@ public class OpenHouseTablesApiHandler implements TablesApiHandler {
       String tableId,
       CreateUpdateLockRequestBody createUpdateLockRequestBody,
       String tableCreatorUpdator) {
+    if (dropIfBranched("createLock")) {
+      return ApiResponse.<Void>builder().httpStatus(HttpStatus.CREATED).build();
+    }
     tablesApiValidator.validateCreateLock(databaseId, tableId, createUpdateLockRequestBody);
     tableService.createLock(databaseId, tableId, createUpdateLockRequestBody, tableCreatorUpdator);
     return ApiResponse.<Void>builder().httpStatus(HttpStatus.CREATED).build();
@@ -200,6 +221,9 @@ public class OpenHouseTablesApiHandler implements TablesApiHandler {
   @Override
   public ApiResponse<Void> deleteLock(
       String databaseId, String tableId, String tableCreatorUpdator) {
+    if (dropIfBranched("deleteLock")) {
+      return ApiResponse.<Void>builder().httpStatus(HttpStatus.NO_CONTENT).build();
+    }
     tablesApiValidator.validateGetTable(databaseId, tableId);
     tableService.deleteLock(databaseId, tableId, tableCreatorUpdator);
     return ApiResponse.<Void>builder().httpStatus(HttpStatus.NO_CONTENT).build();
@@ -239,5 +263,14 @@ public class OpenHouseTablesApiHandler implements TablesApiHandler {
     }
     tableService.restoreTable(databaseId, tableId, deletedAtMs, actingPrincipal);
     return ApiResponse.<Void>builder().httpStatus(HttpStatus.NO_CONTENT).build();
+  }
+
+  private boolean dropIfBranched(String op) {
+    String branch = WapBranch.fromRequest();
+    if (WapBranch.isNonMain(branch)) {
+      log.info("Dropping {} for non-main branch {}", op, branch);
+      return true;
+    }
+    return false;
   }
 }
