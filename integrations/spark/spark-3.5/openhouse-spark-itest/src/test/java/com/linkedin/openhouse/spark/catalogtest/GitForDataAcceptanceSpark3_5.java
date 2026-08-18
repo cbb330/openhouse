@@ -46,7 +46,8 @@ import org.junit.jupiter.params.provider.MethodSource;
  * Acceptance matrix for {@code git-for-data-ddl.md}. Rows are the verbs; columns are milestones.
  *
  * <p>{@link #CURRENT} is the shipped milestone and the only column asserted. Flip it when M2/M3
- * land. DDL strings stay fixed.
+ * land. DDL strings stay fixed. Isolation is the server skip when {@code X-OH-Wap-Branch} is not
+ * main; the client sends honest schema/property/policy commits.
  *
  * <pre>
  *   BRANCH  prod unchanged; after reload the branch still shows the change

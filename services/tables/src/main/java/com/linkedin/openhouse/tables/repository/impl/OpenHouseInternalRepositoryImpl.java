@@ -180,12 +180,12 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
     } else {
       table = catalog.loadTable(tableIdentifier);
       Transaction transaction = table.newTransaction();
-      updateEligibilityCheck(table, tableDto);
-
       boolean dropDefinition = WapBranch.isNonMain(WapBranch.fromRequest());
+      updateEligibilityCheck(table, tableDto, dropDefinition);
+
       if (dropDefinition) {
         log.info(
-            "Skipping schema/property/policy/sort updates for non-main branch {} on {}",
+            "Skipping schema/property/policy/sort/spec updates for non-main branch {} on {}",
             WapBranch.fromRequest(),
             tableIdentifier);
       }
@@ -451,12 +451,16 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
    * {@link com.linkedin.openhouse.common.exception.handler.OpenHouseExceptionHandler} to deal with
    */
   @WithSpan("InternalRepository.updateEligibilityCheck")
-  protected void updateEligibilityCheck(Table existingTable, TableDto tableDto) {
+  protected void updateEligibilityCheck(
+      Table existingTable, TableDto tableDto, boolean dropDefinition) {
     if (!skipEligibilityCheck(existingTable.properties(), tableDto.getTableProperties())) {
       // eligibility check is relaxed for request from replication flow since preserved properties
       // & tableType will differ in tableDto and existing table.
-      PartitionSpec partitionSpec = partitionSpecMapper.toPartitionSpec(tableDto);
       versionCheck(existingTable, tableDto);
+      if (dropDefinition) {
+        return;
+      }
+      PartitionSpec partitionSpec = partitionSpecMapper.toPartitionSpec(tableDto);
       checkIfPreservedTblPropsModified(tableDto, existingTable);
       checkIfTableTypeModified(tableDto, existingTable);
       checkPartitionSpecEvolution(partitionSpec, existingTable.spec());

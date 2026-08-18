@@ -9,9 +9,9 @@ import org.springframework.web.context.request.ServletRequestAttributes;
  * Session-branch target stamped by the OpenHouse Java client ({@code X-OH-Wap-Branch}, and for ACL
  * the body {@code properties.branch}). When the target is a non-main branch, identity mutations
  * (delete, rename, ACL, lock) are no-ops on the house table, and schema / user-property / policy /
- * sort updates are skipped on {@code updateTable} / {@code putSnapshots}. Snapshots and refs still
- * apply. The request still names the branch so a later clone/branch ACL model can consume the same
- * shape.
+ * sort updates and partition-spec eligibility are skipped on {@code updateTable} / {@code
+ * putSnapshots}. Snapshots and refs still apply. The request still names the branch so a later
+ * clone/branch ACL model can consume the same shape.
  */
 public final class WapBranch {
 

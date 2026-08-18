@@ -28,8 +28,8 @@ import scala.Option;
  *
  * <p>DROP resets the session branch to empty, stamps REST delete, and leaves the table. CREATE on
  * an existing table is ensure-branch, not TableAlreadyExists. RENAME stamps REST and the server
- * no-ops. ALTER is not filtered here; the client sanitizes schema/properties so they do not move
- * main.
+ * no-ops. ALTER is not filtered here; the server skips table-scoped updates when the branch header
+ * is set.
  */
 public class GitForDataSparkCatalog extends SparkCatalog {
   private static final Logger LOG = LoggerFactory.getLogger(GitForDataSparkCatalog.class);

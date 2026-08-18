@@ -70,7 +70,7 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
    */
   private final AtomicReference<Map<String, String>> config = new AtomicReference<>();
 
-  /** Last unprojected metadata (after ReadBridge, before branch overlay). */
+  /** Last loaded metadata (after ReadBridge). Used as a fallback base table version. */
   private final AtomicReference<TableMetadata> durableMetadata = new AtomicReference<>();
 
   /**
@@ -238,12 +238,8 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
       TableMetadata base, TableMetadata metadata) {
     // Iceberg commit() requires base == current(); strip overlays here, not by swapping base.
     metadata = ReadBridge.from(currentConfig()).sanitize(metadata);
-    String branch = SessionWapBranch.get();
-    TableMetadata durable = durableMetadata.get();
-    if (branch != null && durable != null) {
-      log.info("Sanitizing branched schema/properties for {} (branch {})", tableName(), branch);
-      metadata = BranchOverlay.sanitize(durable, metadata, branch);
-    }
+    // Table-scoped fields (schema / props / policies / sort) are sent honestly. Isolation is
+    // the server skip when X-OH-Wap-Branch is not main. Snapshot/ref updates still apply.
     CreateUpdateTableRequestBody createUpdateTableRequestBody = new CreateUpdateTableRequestBody();
     createUpdateTableRequestBody.setBaseTableVersion(baseTableVersion(base));
     createUpdateTableRequestBody.setTableId(tableIdentifier.name());
