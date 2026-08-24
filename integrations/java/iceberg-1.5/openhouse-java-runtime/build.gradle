@@ -69,6 +69,7 @@ shadowJar {
       exclude 'org.xml.sax.**'
       exclude 'org.apache.hadoop.**'
       exclude 'org.apache.iceberg.**'
+      exclude 'org.apache.spark.**'
       exclude 'org.slf4j.**'
     }
     relocate('reactor', 'com.linkedin.openhouse.relocated.reactor')

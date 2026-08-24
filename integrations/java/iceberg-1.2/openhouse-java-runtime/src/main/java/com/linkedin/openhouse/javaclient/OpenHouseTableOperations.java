@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import lombok.AccessLevel;
 import lombok.AllArgsConstructor;
@@ -30,12 +31,14 @@ import org.apache.iceberg.SnapshotParser;
 import org.apache.iceberg.SnapshotRefParser;
 import org.apache.iceberg.SortOrderParser;
 import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.TableMetadataParser;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.exceptions.BadRequestException;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.util.Tasks;
 import org.springframework.web.reactive.function.client.WebClientRequestException;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Mono;
@@ -60,6 +63,24 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
   @Getter(AccessLevel.PROTECTED)
   private String cluster;
 
+  /**
+   * The per-table client {@code config} (Iceberg REST {@code LoadTableResponse.config} convention)
+   * the OH server stamped onto the most recent table-load response (or {@code null} if none / not
+   * yet refreshed). A final holder keeps Lombok's all-args constructor unchanged.
+   */
+  private final AtomicReference<Map<String, String>> config = new AtomicReference<>();
+
+  /** Last loaded metadata (after ReadBridge). Used as a fallback base table version. */
+  private final AtomicReference<TableMetadata> durableMetadata = new AtomicReference<>();
+
+  /**
+   * The server-stamped per-table client config from the last {@code doRefresh}, or {@code null}
+   * when absent. Subclasses read it to gate read-time behavior.
+   */
+  protected Map<String, String> currentConfig() {
+    return config.get();
+  }
+
   @Override
   protected String tableName() {
     return tableIdentifier.toString();
@@ -80,10 +101,9 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
   @Override
   public void doRefresh() {
     log.info("Calling doRefresh for table: {}", tableName());
-    Optional<String> tableLocation =
+    Optional<GetTableResponseBody> tableResponse =
         tableApi
             .getTableV1(tableIdentifier.namespace().toString(), tableIdentifier.name())
-            .mapNotNull(GetTableResponseBody::getTableLocation)
             /*
              on 404 from table service, resume the stream as empty response.
              for any other error, surface it!
@@ -97,12 +117,46 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
                 WebClientRequestException.class,
                 e -> Mono.error(new WebClientRequestWithMessageException(e)))
             .blockOptional();
+    // Capture the server-stamped per-table config so subclasses can gate read-time behavior via
+    // currentConfig(); absent => null. Side-channel only: never sent back on writes.
+    this.config.set(tableResponse.map(GetTableResponseBody::getConfig).orElse(null));
+    Optional<String> tableLocation = tableResponse.map(GetTableResponseBody::getTableLocation);
     if (!tableLocation.isPresent() && currentMetadataLocation() != null) {
       throw new NoSuchTableException(
           "Cannot find table %s after refresh, maybe another process deleted it", tableName());
     }
-    super.refreshFromMetadataLocation(tableLocation.orElse(null));
+    // Route the parse through loadMetadata() so subclasses can transform metadata as it loads;
+    // (null, 20) preserves the stock refresh behavior.
+    super.refreshFromMetadataLocation(tableLocation.orElse(null), null, 20, this::loadMetadata);
     log.debug("Calling doRefresh succeeded");
+  }
+
+  /**
+   * Loads table metadata from storage and overlays the read-time {@link ReadBridge} behavior the
+   * server stamped onto {@link #currentConfig()}.
+   *
+   * <p>Decode runs <em>before</em> the file read so a malformed config never touches storage.
+   * Bridge failures ({@link IllegalStateException}) are wrapped as {@link
+   * Tasks.UnrecoverableException} so Iceberg's {@code Tasks.retry(20)} around this loader does not
+   * re-read the metadata file to reproduce a deterministic error. IO / parse failures from the file
+   * read remain retryable.
+   */
+  protected TableMetadata loadMetadata(String metadataLocation) {
+    final ReadBridge bridge;
+    try {
+      bridge = ReadBridge.from(currentConfig());
+    } catch (IllegalStateException e) {
+      throw new Tasks.UnrecoverableException(e);
+    }
+    TableMetadata raw = TableMetadataParser.read(io(), metadataLocation);
+    try {
+      TableMetadata bridged = bridge.apply(raw);
+      durableMetadata.set(bridged);
+      // M1: no sidecar / overlay store. Hide leftover gfd.ref.* if any leaked onto the file.
+      return BranchOverlay.hideReservedKeys(bridged);
+    } catch (IllegalStateException e) {
+      throw new Tasks.UnrecoverableException(e);
+    }
   }
 
   @Override
@@ -133,6 +187,17 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
       }
     }
     log.debug("Calling doCommit succeeded");
+  }
+
+  private String baseTableVersion(TableMetadata base) {
+    if (base != null && base.metadataFileLocation() != null) {
+      return base.metadataFileLocation();
+    }
+    TableMetadata durable = durableMetadata.get();
+    if (durable != null && durable.metadataFileLocation() != null) {
+      return durable.metadataFileLocation();
+    }
+    return INITIAL_TABLE_VERSION;
   }
 
   private Boolean isMetadataUpdated(TableMetadata base, TableMetadata metadata) {
@@ -171,9 +236,12 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
 
   protected CreateUpdateTableRequestBody constructMetadataRequestBody(
       TableMetadata base, TableMetadata metadata) {
+    // Iceberg commit() requires base == current(); strip overlays here, not by swapping base.
+    metadata = ReadBridge.from(currentConfig()).sanitize(metadata);
+    // Table-scoped fields (schema / props / policies / sort) are sent honestly. Isolation is
+    // the server skip when X-OH-Wap-Branch is not main. Snapshot/ref updates still apply.
     CreateUpdateTableRequestBody createUpdateTableRequestBody = new CreateUpdateTableRequestBody();
-    createUpdateTableRequestBody.setBaseTableVersion(
-        base == null ? INITIAL_TABLE_VERSION : base.metadataFileLocation());
+    createUpdateTableRequestBody.setBaseTableVersion(baseTableVersion(base));
     createUpdateTableRequestBody.setTableId(tableIdentifier.name());
     createUpdateTableRequestBody.setDatabaseId(tableIdentifier.namespace().toString());
     createUpdateTableRequestBody.setClusterId(cluster);
@@ -213,6 +281,11 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
       createUpdateTableRequestBody.setTableProperties(newTblProperties);
     }
     return createUpdateTableRequestBody;
+  }
+
+  @VisibleForTesting
+  void setCurrentConfig(Map<String, String> value) {
+    config.set(value);
   }
 
   /**
@@ -333,8 +406,7 @@ public class OpenHouseTableOperations extends BaseMetastoreTableOperations {
       TableMetadata newMetadata,
       CreateUpdateTableRequestBody createUpdateTableRequestBody) {
     IcebergSnapshotsRequestBody icebergSnapshotsRequestBody = new IcebergSnapshotsRequestBody();
-    icebergSnapshotsRequestBody.baseTableVersion(
-        base == null ? INITIAL_TABLE_VERSION : base.metadataFileLocation());
+    icebergSnapshotsRequestBody.baseTableVersion(baseTableVersion(base));
     icebergSnapshotsRequestBody.jsonSnapshots(
         newMetadata.snapshots().stream().map(SnapshotParser::toJson).collect(Collectors.toList()));
     icebergSnapshotsRequestBody.snapshotRefs(

@@ -8,6 +8,7 @@ plugins {
 dependencies {
     api project(':client:tableclient')
     api project(':client:jobsclient')
+    api project(':client:optimizerclient')
     api project(':client:hts')
     api 'org.springframework.boot:spring-boot-starter-webflux:2.7.8'
     testImplementation 'io.netty:netty-resolver-dns-native-macos:4.1.70.Final:osx-x86_64'
@@ -15,6 +16,14 @@ dependencies {
     testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:' + junit_version
     testImplementation 'org.mockito:mockito-inline:4.11.0'
 
+}
+
+// Stamp the project version into the jar manifest so WebClientFactory can advertise the client
+// version in the User-Agent header by reading Implementation-Version at runtime.
+jar {
+    manifest {
+        attributes('Implementation-Version': project.version)
+    }
 }
 
 test {

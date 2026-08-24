@@ -81,9 +81,19 @@ public class TablesServiceImpl implements TablesService {
   }
 
   @Override
-  public Page<TableDto> searchTables(String databaseId, int page, int size, String sortBy) {
+  public Page<TableDto> searchTables(
+      String databaseId,
+      int page,
+      int size,
+      String sortBy,
+      List<String> fields,
+      String actingPrincipal) {
+    if (fields != null && !fields.isEmpty()) {
+      authorizationUtils.checkDatabasePrivilege(
+          databaseId, actingPrincipal, Privileges.GET_TABLE_METADATA);
+    }
     Pageable pageable = createPageable(page, size, sortBy, null);
-    return openHouseInternalRepository.searchTables(databaseId, pageable);
+    return openHouseInternalRepository.searchTables(databaseId, pageable, fields);
   }
 
   @WithSpan("TablesService.putTable")
@@ -94,6 +104,7 @@ public class TablesServiceImpl implements TablesService {
       Boolean failOnExist) {
     String databaseId = createUpdateTableRequestBody.getDatabaseId();
     String tableId = createUpdateTableRequestBody.getTableId();
+
     Optional<TableDto> tableDto =
         openHouseInternalRepository.findById(
             TableDtoPrimaryKey.builder().databaseId(databaseId).tableId(tableId).build());
@@ -206,12 +217,14 @@ public class TablesServiceImpl implements TablesService {
     TableDtoPrimaryKey tableDtoPrimaryKey =
         TableDtoPrimaryKey.builder().databaseId(databaseId).tableId(tableId).build();
 
-    Optional<TableDto> tableDto = openHouseInternalRepository.findById(tableDtoPrimaryKey);
-    if (!tableDto.isPresent()) {
-      throw new NoSuchUserTableException(databaseId, tableId);
-    }
-    authorizationUtils.checkTableDropPrivilege(
-        tableDto.get(), actingPrincipal, Privileges.DELETE_TABLE);
+    // Table-ref lookup (no metadata.json parse) is enough here — drop only needs identifiers +
+    // tableUUID for the ACL check. Lets us drop tables whose metadata.json is corrupted.
+    TableDto tableDto =
+        openHouseInternalRepository
+            .findTableRefById(tableDtoPrimaryKey)
+            .orElseThrow(() -> new NoSuchUserTableException(databaseId, tableId));
+
+    authorizationUtils.checkTableDropPrivilege(tableDto, actingPrincipal, Privileges.DELETE_TABLE);
 
     openHouseInternalRepository.deleteById(tableDtoPrimaryKey);
   }

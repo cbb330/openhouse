@@ -4,12 +4,17 @@ import static org.mockito.Mockito.*;
 
 import com.linkedin.openhouse.gen.tables.client.api.SnapshotApi;
 import com.linkedin.openhouse.gen.tables.client.api.TableApi;
+import com.linkedin.openhouse.gen.tables.client.invoker.ApiClient;
 import com.linkedin.openhouse.gen.tables.client.model.CreateUpdateTableRequestBody;
+import com.linkedin.openhouse.gen.tables.client.model.GetTableResponseBody;
 import com.linkedin.openhouse.gen.tables.client.model.History;
 import com.linkedin.openhouse.gen.tables.client.model.Policies;
 import com.linkedin.openhouse.gen.tables.client.model.PolicyTag;
 import com.linkedin.openhouse.gen.tables.client.model.Retention;
 import com.linkedin.openhouse.javaclient.exception.WebClientWithMessageException;
+import com.linkedin.openhouse.relocated.com.fasterxml.jackson.databind.ObjectMapper;
+import com.linkedin.openhouse.relocated.com.fasterxml.jackson.databind.node.ArrayNode;
+import com.linkedin.openhouse.relocated.com.fasterxml.jackson.databind.node.ObjectNode;
 import com.linkedin.openhouse.relocated.org.springframework.http.HttpStatus;
 import com.linkedin.openhouse.relocated.org.springframework.web.reactive.function.client.WebClientRequestException;
 import com.linkedin.openhouse.relocated.org.springframework.web.reactive.function.client.WebClientResponseException;
@@ -22,14 +27,21 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.apache.commons.compress.utils.Lists;
+import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.SchemaParser;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.TableMetadataParser;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
+import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+import org.apache.iceberg.types.Types;
+import org.apache.iceberg.types.Types.NestedField;
+import org.apache.iceberg.util.Tasks;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -478,5 +490,222 @@ public class OpenHouseTableOperationsTest {
         History.GranularityEnum.DAY, updatedPolicies.getHistory().getGranularity());
     Assertions.assertEquals(2, updatedPolicies.getHistory().getVersions());
     Assertions.assertEquals(true, updatedPolicies.getSharingEnabled());
+  }
+
+  private OpenHouseTableOperations refreshableOps(TableApi tableApi) {
+    return OpenHouseTableOperations.builder()
+        .tableIdentifier(TableIdentifier.of("db", "tbl"))
+        .fileIO(mock(FileIO.class))
+        .tableApi(tableApi)
+        .snapshotApi(mock(SnapshotApi.class))
+        .cluster("cluster")
+        .build();
+  }
+
+  /** Before any refresh, there is no server-stamped config, so the safe default is null. */
+  @Test
+  public void testCurrentConfigNullBeforeRefresh() {
+    Assertions.assertNull(refreshableOps(mock(TableApi.class)).currentConfig());
+  }
+
+  /** doRefresh stashes the server-stamped config so subclasses can read it back. */
+  @Test
+  public void testDoRefreshCapturesConfig() {
+    TableApi mockTableApi = mock(TableApi.class);
+    Map<String, String> stamped =
+        Collections.singletonMap("openhouse.read-bridge", "{\"read\":\"ON\"}");
+    GetTableResponseBody body = mock(GetTableResponseBody.class);
+    when(body.getTableLocation()).thenReturn(null);
+    when(body.getConfig()).thenReturn(stamped);
+    when(mockTableApi.getTableV1(anyString(), anyString())).thenReturn(Mono.just(body));
+
+    OpenHouseTableOperations ops = refreshableOps(mockTableApi);
+    ops.doRefresh();
+
+    Assertions.assertSame(stamped, ops.currentConfig());
+  }
+
+  /** Absent config on the response => null, the consumer's safe default. */
+  @Test
+  public void testDoRefreshNullConfigWhenAbsent() {
+    TableApi mockTableApi = mock(TableApi.class);
+    GetTableResponseBody body = mock(GetTableResponseBody.class);
+    when(body.getTableLocation()).thenReturn(null);
+    when(body.getConfig()).thenReturn(null);
+    when(mockTableApi.getTableV1(anyString(), anyString())).thenReturn(Mono.just(body));
+
+    OpenHouseTableOperations ops = refreshableOps(mockTableApi);
+    ops.doRefresh();
+
+    Assertions.assertNull(ops.currentConfig());
+  }
+
+  /**
+   * The held config is a snapshot of the latest refresh, never sticky: once the server stops
+   * stamping config, a subsequent refresh must clear the previously-captured value back to null.
+   * Guards against a stale directive lingering after the server turns it off.
+   */
+  @Test
+  public void testDoRefreshClearsStaleConfig() {
+    TableApi mockTableApi = mock(TableApi.class);
+    Map<String, String> stamped =
+        Collections.singletonMap("openhouse.read-bridge", "{\"read\":\"ON\"}");
+
+    GetTableResponseBody withConfig = mock(GetTableResponseBody.class);
+    when(withConfig.getTableLocation()).thenReturn(null);
+    when(withConfig.getConfig()).thenReturn(stamped);
+
+    GetTableResponseBody withoutConfig = mock(GetTableResponseBody.class);
+    when(withoutConfig.getTableLocation()).thenReturn(null);
+    when(withoutConfig.getConfig()).thenReturn(null);
+
+    // First refresh stamps config, second refresh stops stamping it.
+    when(mockTableApi.getTableV1(anyString(), anyString()))
+        .thenReturn(Mono.just(withConfig))
+        .thenReturn(Mono.just(withoutConfig));
+
+    OpenHouseTableOperations ops = refreshableOps(mockTableApi);
+
+    ops.doRefresh();
+    Assertions.assertSame(stamped, ops.currentConfig());
+
+    ops.doRefresh();
+    Assertions.assertNull(ops.currentConfig());
+  }
+
+  /**
+   * Bridge failures must not ride Iceberg's metadata-read retry. Decode runs before any FileIO
+   * access; {@link Tasks.UnrecoverableException} keeps {@code Tasks.retry(20)} from re-reading
+   * storage ~21 times (~90s) to reproduce a deterministic config error.
+   */
+  @Test
+  public void testMalformedConfigFailsBeforeTouchingStorage() {
+    TableApi mockTableApi = mock(TableApi.class);
+    FileIO mockFileIO = mock(FileIO.class);
+    GetTableResponseBody body = mock(GetTableResponseBody.class);
+    // Non-null location, so a metadata load would otherwise be attempted.
+    when(body.getTableLocation()).thenReturn("/tmp/does-not-matter/metadata.json");
+    when(body.getConfig())
+        .thenReturn(
+            Collections.singletonMap("openhouse.read-bridge.column-default.7", "{bad json"));
+    when(mockTableApi.getTableV1(anyString(), anyString())).thenReturn(Mono.just(body));
+
+    OpenHouseTableOperations ops =
+        OpenHouseTableOperations.builder()
+            .tableIdentifier(TableIdentifier.of("db", "tbl"))
+            .fileIO(mockFileIO)
+            .tableApi(mockTableApi)
+            .snapshotApi(mock(SnapshotApi.class))
+            .cluster("cluster")
+            .build();
+
+    Tasks.UnrecoverableException thrown =
+        Assertions.assertThrows(Tasks.UnrecoverableException.class, ops::doRefresh);
+    Assertions.assertInstanceOf(IllegalStateException.class, thrown.getCause());
+    verifyNoInteractions(mockFileIO);
+  }
+
+  /**
+   * Wire contract: a server-stamped config map deserializes on the client (the Iceberg REST {@code
+   * LoadTableResponse.config} convention — a string map). This is how the value actually arrives on
+   * a real table-load response.
+   */
+  @Test
+  public void testConfigDeserializeFromResponse() throws Exception {
+    ObjectMapper mapper = ApiClient.createDefaultObjectMapper(null);
+    String json =
+        "{\"tableId\":\"tbl\",\"databaseId\":\"db\",\"config\":{"
+            + "\"openhouse.read-bridge\":\"{\\\"read\\\":\\\"ON\\\"}\"}}";
+
+    GetTableResponseBody body = mapper.readValue(json, GetTableResponseBody.class);
+    Map<String, String> config = body.getConfig();
+    Assertions.assertNotNull(config);
+    // value stays an opaque JSON string; the channel never parses it.
+    Assertions.assertEquals("{\"read\":\"ON\"}", config.get("openhouse.read-bridge"));
+  }
+
+  /**
+   * Unknown future fields must not break deserialization — older clients ignore what they do not
+   * understand (FAIL_ON_UNKNOWN_PROPERTIES=false), and unknown config keys are simply carried.
+   */
+  @Test
+  public void testConfigToleratesUnknownFields() throws Exception {
+    ObjectMapper mapper = ApiClient.createDefaultObjectMapper(null);
+    String json =
+        "{\"tableId\":\"tbl\",\"databaseId\":\"db\",\"someFutureField\":\"x\",\"config\":{"
+            + "\"openhouse.unknown-feature\":\"whatever\"}}";
+
+    GetTableResponseBody body = mapper.readValue(json, GetTableResponseBody.class);
+    Map<String, String> config = body.getConfig();
+    Assertions.assertNotNull(config);
+    Assertions.assertEquals("whatever", config.get("openhouse.unknown-feature"));
+  }
+
+  @Test
+  public void constructMetadataRequestBody_stripsStampedIdsKeepsUnstampedColumnDefaults() {
+    TableMetadata commit =
+        tableWithSchema(
+            "file:/tmp/rb-sanitize-ops-c",
+            new Schema(
+                NestedField.optional(1, "id", Types.IntegerType.get()),
+                NestedField.from(NestedField.optional(2, "country", Types.StringType.get()))
+                    .withInitialDefault(Expressions.lit("US"))
+                    .build(),
+                NestedField.from(NestedField.optional(3, "email", Types.StringType.get()))
+                    .withInitialDefault(Expressions.lit("none"))
+                    .build()));
+
+    OpenHouseTableOperations ops = refreshableOps(mock(TableApi.class));
+    ops.setCurrentConfig(
+        Collections.singletonMap(ReadBridge.COLUMN_DEFAULT_PREFIX + "2", "\"US\""));
+
+    CreateUpdateTableRequestBody body = ops.constructMetadataRequestBody(null, commit);
+    Schema sent = SchemaParser.fromJson(body.getSchema());
+
+    Assertions.assertNull(sent.findField(2).initialDefault());
+    Assertions.assertEquals("none", sent.findField(3).initialDefault());
+    Assertions.assertEquals("email", sent.findField(3).name());
+  }
+
+  @Test
+  public void constructMetadataRequestBody_withoutConfigLeavesWriterDefaults() {
+    TableMetadata commit =
+        tableWithSchema(
+            "file:/tmp/rb-sanitize-create",
+            new Schema(
+                NestedField.from(NestedField.optional(1, "country", Types.StringType.get()))
+                    .withInitialDefault(Expressions.lit("US"))
+                    .build()));
+
+    CreateUpdateTableRequestBody body =
+        refreshableOps(mock(TableApi.class)).constructMetadataRequestBody(null, commit);
+
+    Assertions.assertEquals(
+        "US", SchemaParser.fromJson(body.getSchema()).findField(1).initialDefault());
+  }
+
+  /**
+   * {@link TableMetadata#newTableMetadata} reassigns ids and drops defaults. Put this schema back
+   * so sanitize tests can see writer/overlay defaults.
+   */
+  private static TableMetadata tableWithSchema(String location, Schema schema) {
+    TableMetadata created =
+        TableMetadata.newTableMetadata(
+            schema, PartitionSpec.unpartitioned(), location, Collections.emptyMap());
+    try {
+      ObjectMapper mapper = new ObjectMapper();
+      ObjectNode root = (ObjectNode) mapper.readTree(TableMetadataParser.toJson(created));
+      Schema kept =
+          new Schema(
+              created.currentSchemaId(),
+              schema.columns(),
+              schema.getAliases(),
+              schema.identifierFieldIds());
+      ((ArrayNode) root.get("schemas")).set(0, mapper.readTree(SchemaParser.toJson(kept)));
+      return TableMetadataParser.fromJson(
+          created.metadataFileLocation(), mapper.writeValueAsString(root));
+    } catch (Exception e) {
+      throw new IllegalStateException(e);
+    }
   }
 }

@@ -22,6 +22,7 @@ configurations {
 sourceSets {
   main {
     java {
+      srcDirs += 'src/main/java'
       srcDirs += "${project(':integrations:spark:spark-3.1:openhouse-spark-runtime_2.12').buildDir}/generated-src/antlr/main"
     }
   }

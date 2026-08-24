@@ -40,6 +40,7 @@ import org.apache.iceberg.SchemaParser;
 import org.apache.iceberg.SortOrder;
 import org.apache.iceberg.SortOrderParser;
 import org.apache.iceberg.StaticTableOperations;
+import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.TableOperations;
 import org.apache.iceberg.Transaction;
@@ -52,6 +53,7 @@ import org.apache.iceberg.exceptions.NamespaceNotEmptyException;
 import org.apache.iceberg.exceptions.NoSuchNamespaceException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
 import org.apache.iceberg.exceptions.ValidationException;
+import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.hadoop.HadoopFileIO;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
@@ -102,6 +104,8 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
 
   public static final String CLIENT_NAME = "client-name";
 
+  public static final String CLIENT_VERSION = "client-version";
+
   @Override
   public void initialize(String name, Map<String, String> properties) {
     this.name = name;
@@ -113,14 +117,18 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
     String token = properties.getOrDefault(AUTH_TOKEN, null);
     String httpConnectionStrategy = properties.getOrDefault(HTTP_CONNECTION_STRATEGY, null);
     String clientName = properties.getOrDefault(CLIENT_NAME, null);
+    String clientVersion = properties.getOrDefault(CLIENT_VERSION, null);
     try {
       TablesApiClientFactory tablesApiClientFactory = TablesApiClientFactory.getInstance();
       tablesApiClientFactory.setStrategy(HttpConnectionStrategy.fromString(httpConnectionStrategy));
       tablesApiClientFactory.setClientName(clientName);
+      tablesApiClientFactory.setClientVersion(clientVersion);
       if (properties.containsKey(CatalogProperties.APP_ID)) {
         tablesApiClientFactory.setSessionId(properties.get(CatalogProperties.APP_ID));
       }
-      this.apiClient = tablesApiClientFactory.createApiClient(uri, token, truststore);
+      this.apiClient =
+          WapBranchRequests.stamp(
+              tablesApiClientFactory.createApiClient(uri, token, truststore), uri, token);
     } catch (MalformedURLException | SSLException e) {
       throw new RuntimeException(
           "OpenHouse Catalog initialization failed: Failure while initializing ApiClient", e);
@@ -199,6 +207,19 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
 
   @Override
   public boolean dropTable(TableIdentifier identifier, boolean purge) {
+    String wapBranch = sessionWapBranchOrNull();
+    if (WapBranchRequests.isNonMain(wapBranch)) {
+      log.warn(
+          "spark.wap.branch={} is set; dropTable {} empties that branch and skips REST delete",
+          wapBranch,
+          identifier);
+      try {
+        resetSessionBranchToEmpty(identifier, wapBranch);
+      } catch (NoSuchTableException e) {
+        log.debug("dropTable under branch: {} does not exist", identifier);
+      }
+      return true;
+    }
     log.info(
         "Calling dropTable with identifier: {}, and purge option: {}",
         identifier.toString(),
@@ -238,6 +259,14 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
 
   @Override
   public void renameTable(TableIdentifier from, TableIdentifier to) {
+    if (WapBranchRequests.isNonMain(SessionWapBranch.get())) {
+      log.info(
+          "Skipping renameTable for non-main WAP branch {} ({} -> {})",
+          SessionWapBranch.get(),
+          from,
+          to);
+      return;
+    }
     log.info(
         "Calling renameTable from table identifier: {}, to table identifier: {}",
         from.toString(),
@@ -272,6 +301,16 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
             WebClientRequestException.class,
             e -> Mono.error(new WebClientRequestWithMessageException(e)))
         .block();
+  }
+
+  @Override
+  public Table loadTable(TableIdentifier identifier) {
+    Table table = super.loadTable(identifier);
+    String branch = sessionWapBranchOrNull();
+    if (branch != null && isValidIdentifier(identifier)) {
+      SessionBranchRefs.ensureFromMain(table, branch);
+    }
+    return table;
   }
 
   @Override
@@ -403,6 +442,13 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
   @Override
   public void updateTableAclPolicies(
       TableIdentifier tableIdentifier, boolean isGrant, String privilege, String principal) {
+    if (WapBranchRequests.isNonMain(SessionWapBranch.get())) {
+      log.info(
+          "Skipping updateTableAclPolicies for non-main WAP branch {} on {}",
+          SessionWapBranch.get(),
+          tableIdentifier);
+      return;
+    }
     log.info(
         "Calling updateTableAclPolicies with identifier: {}, isGrant: {}, privilege: {}, principal: {}",
         tableIdentifier.toString(),
@@ -464,6 +510,13 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
   @Override
   public void updateDatabaseAclPolicies(
       Namespace identifier, boolean isGrant, String privilege, String principal) {
+    if (WapBranchRequests.isNonMain(SessionWapBranch.get())) {
+      log.info(
+          "Skipping updateDatabaseAclPolicies for non-main WAP branch {} on {}",
+          SessionWapBranch.get(),
+          identifier);
+      return;
+    }
     log.info(
         "Calling updateDatabaseAclPolicies with namespace: {}, isGrant: {}, privilege: {}, principal: {}",
         identifier.toString(),
@@ -528,6 +581,10 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
             : UpdateAclPoliciesRequestBody.OperationEnum.REVOKE);
     updateAclPoliciesRequestBody.setPrincipal(principal);
     updateAclPoliciesRequestBody.setRole(role);
+    Map<String, String> branchProps = WapBranchRequests.aclProperties();
+    if (branchProps != null) {
+      updateAclPoliciesRequestBody.setProperties(branchProps);
+    }
     return updateAclPoliciesRequestBody;
   }
 
@@ -695,6 +752,25 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
               .block();
       return new StaticTableOperations(tableLocation, fileIO).refresh();
     }
+  }
+
+  /**
+   * Read {@code spark.wap.branch} from the active SparkSession when this catalog is used from
+   * Spark. Non-Spark callers (no session) get {@code null} and keep the unbranched path.
+   */
+  private static String sessionWapBranchOrNull() {
+    return SessionWapBranch.get();
+  }
+
+  private void resetSessionBranchToEmpty(TableIdentifier identifier, String branch) {
+    Table table = loadTable(identifier);
+    SessionBranchRefs.ensureFromMain(table, branch);
+    table.refresh();
+    if (!table.refs().containsKey(branch)) {
+      throw new IllegalStateException(
+          "Cannot create branch " + branch + " on a table with no snapshots");
+    }
+    table.newDelete().deleteFromRowFilter(Expressions.alwaysTrue()).toBranch(branch).commit();
   }
 
   /**

@@ -2,6 +2,7 @@ package com.linkedin.openhouse.tables.repository.impl;
 
 import static com.linkedin.openhouse.internal.catalog.CatalogConstants.*;
 import static com.linkedin.openhouse.internal.catalog.mapper.HouseTableSerdeUtils.*;
+import static com.linkedin.openhouse.internal.catalog.mapper.HouseTableSerdeUtils.getCanonicalFieldName;
 import static com.linkedin.openhouse.tables.repository.impl.InternalRepositoryUtils.*;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -23,6 +24,8 @@ import com.linkedin.openhouse.internal.catalog.SnapshotsUtil;
 import com.linkedin.openhouse.internal.catalog.fileio.FileIOManager;
 import com.linkedin.openhouse.internal.catalog.model.SoftDeletedTableDto;
 import com.linkedin.openhouse.internal.catalog.model.SoftDeletedTablePrimaryKey;
+import com.linkedin.openhouse.tables.api.WapBranch;
+import com.linkedin.openhouse.tables.api.spec.v0.request.components.Policies;
 import com.linkedin.openhouse.tables.common.TableType;
 import com.linkedin.openhouse.tables.dto.mapper.TablesMapper;
 import com.linkedin.openhouse.tables.dto.mapper.iceberg.PartitionSpecMapper;
@@ -35,9 +38,13 @@ import com.linkedin.openhouse.tables.repository.PreservedKeyChecker;
 import com.linkedin.openhouse.tables.repository.SchemaValidator;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.opentelemetry.instrumentation.annotations.WithSpan;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections.CollectionUtils;
@@ -147,6 +154,11 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
           tableIdentifier,
           System.currentTimeMillis() - startTime);
     } else if (tableDto.isStageReplace() || tableDto.isReplaceCommit()) {
+      validateReplaceTable(tableIdentifier);
+      // Policies are governance metadata (retention, sharing, PII column tags, replication,
+      // history, lock) that must survive a replace. Merge the existing table's policies with the
+      // request's so RTAS consistently merges properties.
+      tableDto = mergePoliciesFromExistingTable(tableIdentifier, tableDto);
       PartitionSpec partitionSpec = partitionSpecMapper.toPartitionSpec(tableDto);
       log.info(
           "Replacing a user table: {} with schema: {} and partitionSpec: {}",
@@ -156,8 +168,8 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
       Map<String, String> tableProps = computePropsForTableCreation(tableDto);
       tablePolicyManager.managePoliciesOnCreateIfNeeded(tableDto);
       SortOrder sortOrder = getIcebergSortOrder(tableDto, writeSchema);
-      String tableLocation =
-          tableDto.getTableVersion().substring(0, tableDto.getTableVersion().lastIndexOf("/"));
+      String metadataLocation = tableProps.get(getCanonicalFieldName("tableLocation"));
+      String tableLocation = metadataLocation.substring(0, metadataLocation.lastIndexOf("/"));
       table =
           replaceTable(
               tableIdentifier, writeSchema, partitionSpec, tableLocation, tableProps, sortOrder);
@@ -168,18 +180,35 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
     } else {
       table = catalog.loadTable(tableIdentifier);
       Transaction transaction = table.newTransaction();
-      updateEligibilityCheck(table, tableDto);
+      boolean dropDefinition = WapBranch.isNonMain(WapBranch.fromRequest());
+      updateEligibilityCheck(table, tableDto, dropDefinition);
+
+      if (dropDefinition) {
+        log.info(
+            "Skipping schema/property/policy/sort/spec updates for non-main branch {} on {}",
+            WapBranch.fromRequest(),
+            tableIdentifier);
+      }
 
       UpdateProperties updateProperties = transaction.updateProperties();
       boolean schemaUpdated =
-          doUpdateSchemaIfNeeded(writeSchema, table.schema(), tableDto, updateProperties);
-      boolean propsUpdated = doUpdateUserPropsIfNeeded(updateProperties, tableDto, table);
+          dropDefinition
+              ? false
+              : doUpdateSchemaIfNeeded(writeSchema, table.schema(), tableDto, updateProperties);
+      boolean propsUpdated =
+          dropDefinition
+              ? doUpdateWapEnabledIfNeeded(updateProperties, tableDto, table)
+              : doUpdateUserPropsIfNeeded(updateProperties, tableDto, table);
       boolean snapshotsUpdated = doUpdateSnapshotsIfNeeded(updateProperties, tableDto);
       boolean policiesUpdated =
-          tablePolicyManager.managePoliciesOnUpdateIfNeeded(
-              updateProperties, tableDto, table.properties());
+          dropDefinition
+              ? false
+              : tablePolicyManager.managePoliciesOnUpdateIfNeeded(
+                  updateProperties, tableDto, table.properties());
       boolean sortOrderUpdated =
-          doUpdateSortOrderIfNeeded(updateProperties, tableDto, table, writeSchema);
+          dropDefinition
+              ? false
+              : doUpdateSortOrderIfNeeded(updateProperties, tableDto, table, writeSchema);
       // TODO remove tableTypeAdded after all existing tables have been back-filled to have a
       // tableType
       boolean tableTypeAdded = checkIfTableTypeAdded(updateProperties, table.properties());
@@ -311,16 +340,127 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
   }
 
   /**
+   * RTAS is only permitted when the {@value CatalogConstants#RTAS_ENABLED_TABLE_PROP} table
+   * property is set. And it is not allowed on table where WAP or replication is enabled.
+   *
+   * @param tableIdentifier identifier for the table
+   */
+  protected void validateReplaceTable(TableIdentifier tableIdentifier) {
+    // A replace is only permitted when RTAS is enabled on the table.
+    Table table = catalog.loadTable(tableIdentifier);
+    Map<String, String> existingProperties = table.properties();
+    if (!Boolean.parseBoolean(existingProperties.get(RTAS_ENABLED_TABLE_PROP))) {
+      throw new UnsupportedClientOperationException(
+          UnsupportedClientOperationException.Operation.RTAS_DISABLED,
+          String.format(
+              "REPLACE TABLE AS SELECT is not enabled for table openhouse.%s.%s. You can enable this feature with 'ALTER TABLE openhouse.%s.%s SET TBLPROPERTIES ('%s'='true')'",
+              tableIdentifier.namespace(),
+              tableIdentifier.name(),
+              tableIdentifier.namespace(),
+              tableIdentifier.name(),
+              RTAS_ENABLED_TABLE_PROP));
+    }
+
+    // RTAS is incompatible with WAP or replication.
+    boolean wapEnabled = Boolean.parseBoolean(existingProperties.get(WAP_ENABLED_TABLE_PROP));
+    Policies existingPolicies =
+        policiesMapper.toPoliciesObject(existingProperties.get(POLICIES_KEY));
+    boolean replicationEnabled =
+        existingPolicies != null
+            && existingPolicies.getReplication() != null
+            && existingPolicies.getReplication().getConfig() != null
+            && !existingPolicies.getReplication().getConfig().isEmpty();
+    if (wapEnabled || replicationEnabled) {
+      List<String> conflictingFeatures = new ArrayList<>();
+      if (wapEnabled) {
+        conflictingFeatures.add(String.format("WAP ('%s=true')", WAP_ENABLED_TABLE_PROP));
+      }
+      if (replicationEnabled) {
+        conflictingFeatures.add("replication");
+      }
+      throw new UnsupportedClientOperationException(
+          UnsupportedClientOperationException.Operation.RTAS_DISABLED,
+          String.format(
+              "REPLACE TABLE AS SELECT cannot be performed on table %s.%s while %s is enabled.",
+              tableIdentifier.namespace(),
+              tableIdentifier.name(),
+              String.join(" and ", conflictingFeatures)));
+    }
+  }
+
+  /**
+   * Returns a copy of {@code requested} whose policies are the existing table's policies merged
+   * with the request's. Policies are table metadata that a CREATE OR REPLACE must not silently
+   * drop: each plane the request provides wins, and every plane it omits is carried forward from
+   * the existing table.
+   */
+  private TableDto mergePoliciesFromExistingTable(
+      TableIdentifier tableIdentifier, TableDto requested) {
+    Policies existingPolicies =
+        policiesMapper.toPoliciesObject(
+            catalog.loadTable(tableIdentifier).properties().get(POLICIES_KEY));
+    return requested
+        .toBuilder()
+        .policies(mergePolicies(existingPolicies, requested.getPolicies()))
+        .build();
+  }
+
+  /**
+   * Per-plane merge of table policies for a replace. The builder is based on {@code existing}, so
+   * any plane the request does not override is carried forward from the existing table.
+   *
+   * <ul>
+   *   <li>{@code retention}, {@code replication}, {@code history}, {@code lockState}: the request
+   *       wins when it provides the plane (non-null); otherwise the existing plane is kept.
+   *   <li>{@code columnTags}: overwrite semantics -- a non-empty request map replaces the existing
+   *       column tags wholesale; an absent or empty map keeps the existing tags. Clearing all tags
+   *       cannot be expressed through a replace (use {@code ALTER TABLE ... MODIFY COLUMN ... UNSET
+   *       TAG}).
+   *   <li>{@code sharingEnabled}: a primitive boolean with no "unset" state, so it cannot be
+   *       distinguished from a request that simply omits it. It is preserved from the existing
+   *       table across a replace; change it with {@code ALTER TABLE ... SET POLICY (SHARING=...)}.
+   * </ul>
+   */
+  static Policies mergePolicies(Policies existing, Policies requested) {
+    if (existing == null) {
+      return requested;
+    }
+    if (requested == null) {
+      return existing;
+    }
+    return existing
+        .toBuilder()
+        .retention(
+            requested.getRetention() != null ? requested.getRetention() : existing.getRetention())
+        .columnTags(
+            MapUtils.isEmpty(requested.getColumnTags())
+                ? existing.getColumnTags()
+                : requested.getColumnTags())
+        .replication(
+            requested.getReplication() != null
+                ? requested.getReplication()
+                : existing.getReplication())
+        .history(requested.getHistory() != null ? requested.getHistory() : existing.getHistory())
+        .lockState(
+            requested.getLockState() != null ? requested.getLockState() : existing.getLockState())
+        .build();
+  }
+
+  /**
    * Check the eligibility of table updates. Throw exceptions when invalidate behaviors detected for
    * {@link com.linkedin.openhouse.common.exception.handler.OpenHouseExceptionHandler} to deal with
    */
   @WithSpan("InternalRepository.updateEligibilityCheck")
-  protected void updateEligibilityCheck(Table existingTable, TableDto tableDto) {
+  protected void updateEligibilityCheck(
+      Table existingTable, TableDto tableDto, boolean dropDefinition) {
     if (!skipEligibilityCheck(existingTable.properties(), tableDto.getTableProperties())) {
       // eligibility check is relaxed for request from replication flow since preserved properties
       // & tableType will differ in tableDto and existing table.
-      PartitionSpec partitionSpec = partitionSpecMapper.toPartitionSpec(tableDto);
       versionCheck(existingTable, tableDto);
+      if (dropDefinition) {
+        return;
+      }
+      PartitionSpec partitionSpec = partitionSpecMapper.toPartitionSpec(tableDto);
       checkIfPreservedTblPropsModified(tableDto, existingTable);
       checkIfTableTypeModified(tableDto, existingTable);
       checkPartitionSpecEvolution(partitionSpec, existingTable.spec());
@@ -414,7 +554,10 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
     // Populate non-preserved keys, mainly user defined properties.
     Map<String, String> propertiesMap =
         tableDto.getTableProperties().entrySet().stream()
-            .filter(entry -> preservedKeyChecker.allowKeyInCreation(entry.getKey(), tableDto))
+            .filter(
+                entry ->
+                    !preservedKeyChecker.isKeyPreservedForTable(entry.getKey(), tableDto)
+                        || preservedKeyChecker.allowKeyInCreation(entry.getKey(), tableDto))
             .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
 
     // Only set cluster default for DEFAULT_FILE_FORMAT if user hasn't provided a value
@@ -554,6 +697,27 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
   }
 
   /**
+   * Iceberg WAP must still land on the table until clone replaces it. Other user properties are
+   * skipped when the request names a non-main branch.
+   */
+  private boolean doUpdateWapEnabledIfNeeded(
+      UpdateProperties updateProperties, TableDto providedTableDto, Table existingTable) {
+    if (providedTableDto.getTableProperties() == null) {
+      return false;
+    }
+    String desired = providedTableDto.getTableProperties().get(WAP_ENABLED_TABLE_PROP);
+    if (desired == null) {
+      return false;
+    }
+    String existing = existingTable.properties().get(WAP_ENABLED_TABLE_PROP);
+    if (Objects.equals(desired, existing)) {
+      return false;
+    }
+    updateProperties.set(WAP_ENABLED_TABLE_PROP, desired);
+    return true;
+  }
+
+  /**
    * @param updateProperties
    * @param providedTableDto
    * @return Whether there are any properties-updates actually materialized.
@@ -677,6 +841,25 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
             table, fileIOManager, partitionSpecMapper, policiesMapper, tableTypeMapper));
   }
 
+  @Override
+  public Optional<TableDto> findTableRefById(TableDtoPrimaryKey tableDtoPrimaryKey) {
+    if (!(catalog instanceof OpenHouseInternalCatalog)) {
+      throw new UnsupportedOperationException(
+          "findTableRefById is not supported for catalog type: " + catalog.getClass().getName());
+    }
+    return ((OpenHouseInternalCatalog) catalog)
+        .findHouseTable(
+            TableIdentifier.of(tableDtoPrimaryKey.getDatabaseId(), tableDtoPrimaryKey.getTableId()))
+        .map(
+            houseTable ->
+                TableDto.builder()
+                    .databaseId(houseTable.getDatabaseId())
+                    .tableId(houseTable.getTableId())
+                    .tableUUID(houseTable.getTableUUID())
+                    .tableLocation(houseTable.getTableLocation())
+                    .build());
+  }
+
   // FIXME: Likely need a cache layer to avoid expensive tableScan.
   @Timed(metricKey = MetricsConstant.REPO_TABLE_EXISTS_TIME)
   @Override
@@ -711,6 +894,22 @@ public class OpenHouseInternalRepositoryImpl implements OpenHouseInternalReposit
     return ((OpenHouseInternalCatalog) catalog)
         .listTables(Namespace.of(databaseId), pageable)
         .map(tablesIdentifier -> mapper.toTableDto(tablesIdentifier));
+  }
+
+  @Timed(metricKey = MetricsConstant.REPO_TABLES_SEARCH_BY_DATABASE_PAGINATED_TIME)
+  @Override
+  public Page<TableDto> searchTables(String databaseId, Pageable pageable, List<String> fields) {
+    if (CollectionUtils.isEmpty(fields)) {
+      return searchTables(databaseId, pageable);
+    }
+    if (!(catalog instanceof OpenHouseInternalCatalog)) {
+      throw new UnsupportedOperationException(
+          "Does not support paginated search for getting all tables in a database");
+    }
+    Set<String> fieldSet = new HashSet<>(fields);
+    return ((OpenHouseInternalCatalog) catalog)
+        .listHouseTables(Namespace.of(databaseId), pageable)
+        .map(houseTable -> mapper.toTableDto(houseTable, fieldSet));
   }
 
   @Timed(metricKey = MetricsConstant.REPO_TABLE_IDS_FIND_ALL_TIME)

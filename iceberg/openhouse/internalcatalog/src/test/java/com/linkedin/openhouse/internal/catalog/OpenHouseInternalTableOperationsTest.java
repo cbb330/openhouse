@@ -9,6 +9,7 @@ import com.linkedin.openhouse.cluster.storage.StorageType;
 import com.linkedin.openhouse.cluster.storage.local.LocalStorage;
 import com.linkedin.openhouse.cluster.storage.local.LocalStorageClient;
 import com.linkedin.openhouse.common.exception.InvalidTableMetadataException;
+import com.linkedin.openhouse.internal.catalog.cache.TableMetadataCache;
 import com.linkedin.openhouse.internal.catalog.fileio.FileIOManager;
 import com.linkedin.openhouse.internal.catalog.mapper.HouseTableMapper;
 import com.linkedin.openhouse.internal.catalog.model.HouseTable;
@@ -29,13 +30,17 @@ import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import lombok.SneakyThrows;
 import org.apache.commons.compress.utils.Lists;
@@ -97,6 +102,7 @@ public class OpenHouseInternalTableOperationsTest {
   @Mock private FSDataInputStream mockFSDataInputStream;
   @Mock private FSDataOutputStream mockFSDataOutputStream;
 
+  private TableMetadataCache tableMetadataCache;
   private OpenHouseInternalTableOperations openHouseInternalTableOperations;
   private OpenHouseInternalTableOperations openHouseInternalTableOperationsWithMockMetrics;
 
@@ -108,6 +114,7 @@ public class OpenHouseInternalTableOperationsTest {
   @BeforeEach
   void setup() {
     MockitoAnnotations.openMocks(this);
+    tableMetadataCache = new InMemoryTableMetadataCache();
     Mockito.when(mockHouseTableMapper.toHouseTable(Mockito.any(TableMetadata.class), Mockito.any()))
         .thenReturn(mockHouseTable);
     HadoopFileIO fileIO = new HadoopFileIO(new Configuration());
@@ -120,7 +127,8 @@ public class OpenHouseInternalTableOperationsTest {
             mockHouseTableMapper,
             TEST_TABLE_IDENTIFIER,
             metricsReporter,
-            fileIOManager);
+            fileIOManager,
+            tableMetadataCache);
 
     // Create a separate instance with mock metrics reporter for testing metrics
     openHouseInternalTableOperationsWithMockMetrics =
@@ -130,7 +138,8 @@ public class OpenHouseInternalTableOperationsTest {
             mockHouseTableMapper,
             TEST_TABLE_IDENTIFIER,
             mockMetricsReporter,
-            fileIOManager);
+            fileIOManager,
+            tableMetadataCache);
 
     LocalStorage localStorage = mock(LocalStorage.class);
     when(fileIOManager.getStorage(fileIO)).thenReturn(localStorage);
@@ -210,6 +219,107 @@ public class OpenHouseInternalTableOperationsTest {
 
       Assertions.assertTrue(updatedProperties.containsKey(getCanonicalFieldName("tableLocation")));
       Mockito.verify(mockHouseTableRepository, Mockito.times(1)).save(Mockito.eq(mockHouseTable));
+    }
+  }
+
+  /**
+   * Deterministic local reproduction of incident-12185 -- the {@code BaseTransaction.applyUpdates}
+   * silent-rebase variant of the stale-base lost-update class (2026-05-25 WAR fingerprint, where
+   * snapshot 3635817277608242413 was silently rebased out by a concurrent commit).
+   *
+   * <p>Reconstructed at the {@code doCommit} boundary (no threads, no deploy):
+   *
+   * <ul>
+   *   <li>A writer loaded the table at base T_X and staged a commit: {@code COMMIT_KEY=T_X} and a
+   *       {@code SNAPSHOTS_JSON} payload computed against T_X (does NOT contain the racing
+   *       snapshot).
+   *   <li>A concurrent commit landed, advancing the catalog to T_Y, which DOES contain the racing
+   *       snapshot.
+   *   <li>{@code BaseTransaction.applyUpdates} silently refreshed the in-flight base T_X -&gt; T_Y
+   *       and re-applied the staged {@code PropertiesUpdate}: {@code COMMIT_KEY} is re-stamped as
+   *       T_X on top of T_Y, while {@code SNAPSHOTS_JSON} stays the writer's stale
+   *       (racing-snapshot-free) list.
+   *   <li>{@code doCommit} then runs with {@code base=T_Y} (metadataFileLocation non-null) but
+   *       {@code COMMIT_KEY=T_X}.
+   * </ul>
+   *
+   * <p>On the unfixed catalog, {@code doCommit}'s subtractive snapshot merge computes {@code
+   * toRemove = T_Y.snapshots() - stalePayload = {racingSnapshot}} and SILENTLY drops it (no
+   * exception, {@code save()} invoked) -- the lost update. {@code doCommit} MUST instead detect
+   * that the writer's declared base ({@code COMMIT_KEY=T_X}) diverges from the actual base (T_Y)
+   * and abort with {@link CommitFailedException} so Iceberg refreshes and retries against T_Y
+   * (where a recomputed expire/append keeps the racing snapshot).
+   *
+   * <p>This test asserts the required abort, so it FAILS on the current checkout (the racing
+   * snapshot is silently dropped instead) and PASSES once the {@code doCommit} stale-base CAS (OSS
+   * PR #612) is applied.
+   */
+  @Test
+  void testDoCommitMustAbortStaleBaseRebaseToPreventSnapshotLoss() throws IOException {
+    List<Snapshot> testSnapshots = IcebergTestUtil.getSnapshots();
+    Snapshot writerKnown1 = testSnapshots.get(0);
+    Snapshot writerKnown2 = testSnapshots.get(1);
+    // Added concurrently (lands in T_Y); absent from the writer's stale payload.
+    Snapshot racingSnapshot = testSnapshots.get(2);
+
+    // The base the writer THOUGHT it was committing against (T_X) -- different from the catalog
+    // head.
+    String writerClaimedBaseLocation =
+        "/test/openhouse/test_db/test_table/00001-writer-claimed-base.metadata.json";
+
+    // Build T_Y (post-refresh base) with all three snapshots and round-trip it through
+    // TableMetadataParser so metadataFileLocation() is non-null, matching what Iceberg passes into
+    // doCommit for a base loaded from disk after applyUpdates' silent refresh.
+    java.nio.file.Path tmpDir = Files.createTempDirectory("oh-incident-12185-repro");
+    String postRefreshBasePath = tmpDir.resolve("00010-post-refresh-base.metadata.json").toString();
+    TableMetadata buildable =
+        TableMetadata.buildFrom(BASE_TABLE_METADATA)
+            .setBranchSnapshot(writerKnown1, SnapshotRef.MAIN_BRANCH)
+            .setBranchSnapshot(writerKnown2, SnapshotRef.MAIN_BRANCH)
+            .setBranchSnapshot(racingSnapshot, SnapshotRef.MAIN_BRANCH)
+            .build();
+    Path postRefreshBaseFsPath = new Path(postRefreshBasePath);
+    FileSystem fs = postRefreshBaseFsPath.getFileSystem(new Configuration());
+    try (FSDataOutputStream out = fs.create(postRefreshBaseFsPath, true)) {
+      out.write(TableMetadataParser.toJson(buildable).getBytes());
+    }
+    TableMetadata postRefreshBase =
+        TableMetadataParser.read(new HadoopFileIO(new Configuration()), postRefreshBasePath);
+    Assertions.assertNotNull(postRefreshBase.metadataFileLocation());
+
+    // The writer's stale payload: only the snapshots it knew about at T_X (racing snapshot
+    // omitted).
+    List<Snapshot> staleWriterPayload = Arrays.asList(writerKnown1, writerKnown2);
+    Map<String, String> properties = new HashMap<>();
+    properties.put(
+        CatalogConstants.SNAPSHOTS_JSON_KEY, SnapshotsUtil.serializedSnapshots(staleWriterPayload));
+    properties.put(
+        CatalogConstants.SNAPSHOTS_REFS_KEY,
+        SnapshotsUtil.serializeMap(IcebergTestUtil.createMainBranchRefPointingTo(writerKnown2)));
+    properties.put(getCanonicalFieldName("tableLocation"), TEST_LOCATION);
+    // applyUpdates re-stamped the writer's ORIGINAL claimed base here, even though base is now T_Y.
+    properties.put(CatalogConstants.COMMIT_KEY, writerClaimedBaseLocation);
+
+    TableMetadata metadata = postRefreshBase.replaceProperties(properties);
+
+    try (MockedStatic<TableMetadataParser> ignoreWriteMock =
+        Mockito.mockStatic(TableMetadataParser.class)) {
+      CommitFailedException thrown =
+          Assertions.assertThrows(
+              CommitFailedException.class,
+              () -> openHouseInternalTableOperations.doCommit(postRefreshBase, metadata),
+              "REPRO incident-12185: doCommit must abort when the writer's declared base (COMMIT_KEY) "
+                  + "diverges from the catalog's actual base. On the unfixed catalog no exception is "
+                  + "thrown and the subtractive merge silently expires the racing snapshot "
+                  + racingSnapshot.snapshotId()
+                  + " -- reproducing the lost update.");
+
+      Assertions.assertTrue(
+          thrown.getMessage().contains("Cannot commit"),
+          "Expected stale-base abort message, got: " + thrown.getMessage());
+
+      // The racing snapshot must never have been persisted out of existence.
+      Mockito.verify(mockHouseTableRepository, Mockito.never()).save(Mockito.any());
     }
   }
 
@@ -1069,6 +1179,113 @@ public class OpenHouseInternalTableOperationsTest {
         this::executeCommitMetadata);
   }
 
+  @Test
+  void testRefreshReusesCachedMetadataAcrossOperations() {
+    HouseTablePrimaryKey primaryKey =
+        HouseTablePrimaryKey.builder()
+            .databaseId(TEST_TABLE_IDENTIFIER.namespace().toString())
+            .tableId(TEST_TABLE_IDENTIFIER.name())
+            .build();
+    when(mockHouseTableRepository.findById(primaryKey)).thenReturn(Optional.of(mockHouseTable));
+    when(mockHouseTable.getTableLocation()).thenReturn("test_metadata_location");
+
+    OpenHouseInternalTableOperations secondOperations =
+        new OpenHouseInternalTableOperations(
+            mockHouseTableRepository,
+            new HadoopFileIO(new Configuration()),
+            mockHouseTableMapper,
+            TEST_TABLE_IDENTIFIER,
+            new MetricsReporter(new SimpleMeterRegistry(), "TEST_CATALOG", Lists.newArrayList()),
+            fileIOManager,
+            tableMetadataCache);
+
+    try (MockedStatic<TableMetadataParser> parserMock =
+        Mockito.mockStatic(TableMetadataParser.class, Mockito.CALLS_REAL_METHODS)) {
+      parserMock
+          .when(
+              () ->
+                  TableMetadataParser.read(
+                      Mockito.any(FileIO.class), Mockito.eq("test_metadata_location")))
+          .thenReturn(BASE_TABLE_METADATA);
+
+      openHouseInternalTableOperations.refresh();
+      secondOperations.refresh();
+
+      parserMock.verify(
+          () ->
+              TableMetadataParser.read(
+                  Mockito.any(FileIO.class), Mockito.eq("test_metadata_location")),
+          times(1));
+    }
+  }
+
+  @Test
+  void testCommitSeedsCacheForSubsequentRefresh() {
+    AtomicReference<HouseTable> savedHouseTable = new AtomicReference<>();
+    HouseTablePrimaryKey primaryKey =
+        HouseTablePrimaryKey.builder()
+            .databaseId(TEST_TABLE_IDENTIFIER.namespace().toString())
+            .tableId(TEST_TABLE_IDENTIFIER.name())
+            .build();
+    when(mockHouseTableMapper.toHouseTable(Mockito.any(TableMetadata.class), Mockito.any()))
+        .thenAnswer(
+            invocation -> {
+              TableMetadata tableMetadata = invocation.getArgument(0);
+              HouseTable mappedHouseTable =
+                  HouseTable.builder()
+                      .databaseId(TEST_TABLE_IDENTIFIER.namespace().toString())
+                      .tableId(TEST_TABLE_IDENTIFIER.name())
+                      .tableLocation(
+                          tableMetadata.properties().get(getCanonicalFieldName("tableLocation")))
+                      .build();
+              savedHouseTable.set(mappedHouseTable);
+              return mappedHouseTable;
+            });
+    when(mockHouseTableRepository.save(Mockito.any(HouseTable.class)))
+        .thenAnswer(
+            invocation -> {
+              HouseTable houseTable = invocation.getArgument(0);
+              savedHouseTable.set(houseTable);
+              return houseTable;
+            });
+    when(mockHouseTableRepository.findById(primaryKey))
+        .thenAnswer(invocation -> Optional.ofNullable(savedHouseTable.get()));
+
+    OpenHouseInternalTableOperations refreshedOperations =
+        new OpenHouseInternalTableOperations(
+            mockHouseTableRepository,
+            new HadoopFileIO(new Configuration()),
+            mockHouseTableMapper,
+            TEST_TABLE_IDENTIFIER,
+            new MetricsReporter(new SimpleMeterRegistry(), "TEST_CATALOG", Lists.newArrayList()),
+            fileIOManager,
+            tableMetadataCache);
+
+    Map<String, String> properties = new HashMap<>(BASE_TABLE_METADATA.properties());
+    properties.put(getCanonicalFieldName("tableLocation"), TEST_LOCATION);
+    TableMetadata metadata = BASE_TABLE_METADATA.replaceProperties(properties);
+
+    try (MockedStatic<TableMetadataParser> parserMock =
+        Mockito.mockStatic(TableMetadataParser.class, Mockito.CALLS_REAL_METHODS)) {
+      parserMock
+          .when(
+              () ->
+                  TableMetadataParser.write(
+                      Mockito.any(TableMetadata.class),
+                      Mockito.any(org.apache.iceberg.io.OutputFile.class)))
+          .thenAnswer(invocation -> null);
+
+      openHouseInternalTableOperations.doCommit(BASE_TABLE_METADATA, metadata);
+      refreshedOperations.refresh();
+
+      String committedLocation = savedHouseTable.get().getTableLocation();
+      Assertions.assertEquals(committedLocation, refreshedOperations.currentMetadataLocation());
+      parserMock.verify(
+          () -> TableMetadataParser.read(Mockito.any(FileIO.class), Mockito.eq(committedLocation)),
+          never());
+    }
+  }
+
   /**
    * Common test method for verifying metrics exclude both database and table tags.
    *
@@ -1096,7 +1313,8 @@ public class OpenHouseInternalTableOperationsTest {
             mockHouseTableMapper,
             TEST_TABLE_IDENTIFIER,
             realMetricsReporter,
-            fileIOManager);
+            fileIOManager,
+            tableMetadataCache);
 
     // Setup test-specific mocks
     setupFunction.accept(operationsWithRealMetrics);
@@ -1158,7 +1376,8 @@ public class OpenHouseInternalTableOperationsTest {
             mockHouseTableMapper,
             TEST_TABLE_IDENTIFIER,
             realMetricsReporter,
-            fileIOManager);
+            fileIOManager,
+            tableMetadataCache);
 
     // Setup test-specific mocks
     setupFunction.accept(operationsWithRealMetrics);
@@ -1860,6 +2079,21 @@ public class OpenHouseInternalTableOperationsTest {
     } finally {
       GlobalOpenTelemetry.resetForTest();
       tracerProvider.close();
+    }
+  }
+
+  private static final class InMemoryTableMetadataCache implements TableMetadataCache {
+    private final Map<String, TableMetadata> cache = new ConcurrentHashMap<>();
+
+    @Override
+    public TableMetadata load(String metadataLocation, Supplier<TableMetadata> metadataLoader) {
+      return cache.computeIfAbsent(metadataLocation, ignored -> metadataLoader.get());
+    }
+
+    @Override
+    public TableMetadata seed(String metadataLocation, TableMetadata tableMetadata) {
+      cache.put(metadataLocation, tableMetadata);
+      return tableMetadata;
     }
   }
 

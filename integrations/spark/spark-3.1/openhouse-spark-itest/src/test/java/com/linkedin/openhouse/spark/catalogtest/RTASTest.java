@@ -10,6 +10,7 @@ import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.exceptions.BadRequestException;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.types.Types;
 import org.apache.spark.sql.Row;
@@ -60,6 +61,10 @@ public class RTASTest extends OpenHouseSparkITest {
 
       spark.sql(String.format("ALTER TABLE %s SET POLICY (HISTORY MAX_AGE=24H)", tableName));
 
+      // RTAS is disabled by default; opt the table in before replacing it.
+      spark.sql(
+          String.format("ALTER TABLE %s SET TBLPROPERTIES ('replace.enabled'='true')", tableName));
+
       String expectedTableLocation = catalog.loadTable(tableIdent).location();
 
       // replace table
@@ -83,10 +88,7 @@ public class RTASTest extends OpenHouseSparkITest {
       Table rtasTable = catalog.loadTable(tableIdent);
 
       // verify table location is unchanged
-      assertEquals(
-          stripPathScheme(expectedTableLocation),
-          stripPathScheme(rtasTable.location()),
-          "Should have same table location");
+      assertEquals(expectedTableLocation, rtasTable.location(), "Should have same table location");
       // verify schema and spec are changed
       assertEquals(
           expectedSchema.asStruct(),
@@ -103,14 +105,40 @@ public class RTASTest extends OpenHouseSparkITest {
       assertEquals(
           "val2", rtasTable.properties().get("prop2"), "Should have preserved table property");
       assertEquals("val3", rtasTable.properties().get("prop3"), "Should have new table property");
-      // verify policies are removed
-      assertEquals("", rtasTable.properties().get("policies"));
+      // verify policies are preserved across the replace (RTAS merges the existing policies plane
+      // rather than wiping it)
+      assertTrue(
+          rtasTable.properties().get("policies").contains("history"),
+          "History policy should be preserved across RTAS");
       // verify data is readable
       List<Row> rows =
           spark
               .sql(String.format("SELECT id, data, part FROM %s ORDER BY part, id", tableName))
               .collectAsList();
       assertEquals(3, rows.size());
+    }
+  }
+
+  @Test
+  public void testRTASFailsWhenReplaceDisabled() throws Exception {
+    try (SparkSession spark = getSparkSession()) {
+      // create the table without opting into RTAS; replace is disabled by default
+      spark.sql(
+          String.format(
+              "CREATE TABLE %s USING iceberg AS SELECT * FROM %s", tableName, sourceName));
+
+      // REPLACE TABLE should be rejected because 'replace.enabled' is not set on the table
+      BadRequestException exception =
+          assertThrows(
+              BadRequestException.class,
+              () ->
+                  spark.sql(
+                      String.format(
+                          "REPLACE TABLE %s USING iceberg AS SELECT * FROM %s",
+                          tableName, sourceName)));
+      assertTrue(
+          exception.getMessage().contains("REPLACE TABLE AS SELECT is not enabled"),
+          "Expected an RTAS-disabled error but got: " + exception.getMessage());
     }
   }
 
@@ -127,6 +155,10 @@ public class RTASTest extends OpenHouseSparkITest {
               tableName, sourceName));
 
       String expectedTableLocation = catalog.loadTable(tableIdent).location();
+
+      // RTAS is disabled by default; opt the table in before replacing it.
+      spark.sql(
+          String.format("ALTER TABLE %s SET TBLPROPERTIES ('replace.enabled'='true')", tableName));
 
       // create or replace table should replace the table
       spark.sql(
@@ -151,10 +183,7 @@ public class RTASTest extends OpenHouseSparkITest {
       Table rtasTable = catalog.loadTable(tableIdent);
 
       // verify table location is unchanged
-      assertEquals(
-          stripPathScheme(expectedTableLocation),
-          stripPathScheme(rtasTable.location()),
-          "Should have same table location");
+      assertEquals(expectedTableLocation, rtasTable.location(), "Should have same table location");
       // verify schema and spec are changed
       assertEquals(
           expectedSchema.asStruct(),
@@ -174,6 +203,10 @@ public class RTASTest extends OpenHouseSparkITest {
       Catalog catalog = getOpenHouseCatalog(spark);
 
       spark.table(sourceName).writeTo(tableName).using("iceberg").create();
+
+      // RTAS is disabled by default; opt the table in before replacing it.
+      spark.sql(
+          String.format("ALTER TABLE %s SET TBLPROPERTIES ('replace.enabled'='true')", tableName));
 
       String expectedTableLocation = catalog.loadTable(tableIdent).location();
 
@@ -201,10 +234,7 @@ public class RTASTest extends OpenHouseSparkITest {
       Table rtasTable = catalog.loadTable(tableIdent);
 
       // verify table location is unchanged
-      assertEquals(
-          stripPathScheme(expectedTableLocation),
-          stripPathScheme(rtasTable.location()),
-          "Should have same table location");
+      assertEquals(expectedTableLocation, rtasTable.location(), "Should have same table location");
       // verify schema and spec are changed
       assertEquals(
           expectedSchema.asStruct(),
@@ -234,6 +264,10 @@ public class RTASTest extends OpenHouseSparkITest {
           .partitionedBy(col("part"))
           .using("iceberg")
           .createOrReplace();
+
+      // RTAS is disabled by default; opt the table in before replacing it.
+      spark.sql(
+          String.format("ALTER TABLE %s SET TBLPROPERTIES ('replace.enabled'='true')", tableName));
 
       String expectedTableLocation = catalog.loadTable(tableIdent).location();
 
@@ -265,10 +299,7 @@ public class RTASTest extends OpenHouseSparkITest {
       Table rtasTable = catalog.loadTable(tableIdent);
 
       // verify table location is unchanged
-      assertEquals(
-          stripPathScheme(expectedTableLocation),
-          stripPathScheme(rtasTable.location()),
-          "Should have same table location");
+      assertEquals(expectedTableLocation, rtasTable.location(), "Should have same table location");
       // verify schema and spec are changed
       assertEquals(
           expectedSchema.asStruct(),

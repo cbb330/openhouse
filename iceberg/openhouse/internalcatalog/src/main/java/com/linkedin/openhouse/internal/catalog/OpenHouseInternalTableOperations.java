@@ -13,6 +13,7 @@ import com.linkedin.openhouse.cluster.storage.StorageClient;
 import com.linkedin.openhouse.cluster.storage.hdfs.HdfsStorageClient;
 import com.linkedin.openhouse.cluster.storage.local.LocalStorageClient;
 import com.linkedin.openhouse.common.exception.InvalidTableMetadataException;
+import com.linkedin.openhouse.internal.catalog.cache.TableMetadataCache;
 import com.linkedin.openhouse.internal.catalog.exception.InvalidIcebergSnapshotException;
 import com.linkedin.openhouse.internal.catalog.fileio.FileIOManager;
 import com.linkedin.openhouse.internal.catalog.mapper.HouseTableMapper;
@@ -85,6 +86,8 @@ public class OpenHouseInternalTableOperations extends BaseMetastoreTableOperatio
 
   FileIOManager fileIOManager;
 
+  TableMetadataCache tableMetadataCache;
+
   private static final Gson GSON = new Gson();
 
   private static final Cache<String, Integer> CACHE =
@@ -133,7 +136,10 @@ public class OpenHouseInternalTableOperations extends BaseMetastoreTableOperatio
   protected void refreshMetadata(final String metadataLoc) {
     long startTime = System.currentTimeMillis();
     boolean needToReload = !Objects.equal(currentMetadataLocation(), metadataLoc);
-    Runnable r = () -> super.refreshFromMetadataLocation(metadataLoc);
+    Runnable r =
+        () ->
+            super.refreshFromMetadataLocation(
+                metadataLoc, null, 20, this::loadTableMetadataWithCache);
     try {
       if (needToReload) {
         metricsReporter.executeWithStats(
@@ -259,6 +265,9 @@ public class OpenHouseInternalTableOperations extends BaseMetastoreTableOperatio
     try {
       // Now that we have metadataLocation we stamp it in metadata property.
       Map<String, String> properties = new HashMap<>(metadata.properties());
+
+      abortIfWriterBaseDivergedFromCatalog(base, metadata);
+
       failIfRetryUpdate(properties);
       restoreOverriddenProperties(properties);
 
@@ -355,6 +364,7 @@ public class OpenHouseInternalTableOperations extends BaseMetastoreTableOperatio
                     updatedMtDataRef, io().newOutputFile(newMetadataLocation)),
             InternalCatalogMetricsConstant.METADATA_UPDATE_LATENCY,
             getCatalogMetricTags());
+        tableMetadataCache.seed(newMetadataLocation, updatedMtDataRef);
         log.info(
             "updateMetadata to location {} succeeded, took {} ms",
             newMetadataLocation,
@@ -372,7 +382,7 @@ public class OpenHouseInternalTableOperations extends BaseMetastoreTableOperatio
         writeSpan.end();
       }
 
-      houseTable = houseTableMapper.toHouseTable(metadataToCommit, fileIO);
+      houseTable = houseTableMapper.toHouseTable(updatedMtDataRef, fileIO);
       if (base != null
           && (properties.containsKey(CatalogConstants.OPENHOUSE_TABLEID_KEY)
                   && !properties
@@ -405,7 +415,7 @@ public class OpenHouseInternalTableOperations extends BaseMetastoreTableOperatio
          * "forced refresh" in {@link OpenHouseInternalTableOperations#commit(TableMetadata,
          * TableMetadata)}
          */
-        refreshFromMetadataLocation(newMetadataLocation);
+        refreshMetadata(newMetadataLocation);
       }
       if (isReplicatedTableCreate(properties)) {
         updateMetadataFieldForTable(metadata, newMetadataLocation);
@@ -573,6 +583,55 @@ public class OpenHouseInternalTableOperations extends BaseMetastoreTableOperatio
     }
 
     return builder.build();
+  }
+
+  /**
+   * Catalog-level CAS. Aborts the commit if the writer's declared base ({@code COMMIT_KEY}) does
+   * not match the catalog's current persisted base. Closes the BaseTransaction.applyUpdates
+   * silent-rebase variant of the stale-base bug class, where {@code applyUpdates} re-stamps the
+   * writer's original (non-null) {@code COMMIT_KEY} on top of a concurrently-advanced base.
+   *
+   * <p>Commits that leave {@code COMMIT_KEY} unset (wholesale replace / create — replaceTable,
+   * stage-create, stage-replace) are authoritative over the snapshot set and are intentionally not
+   * defended: there is no stale base to compare against.
+   *
+   * <p>Must run before failIfRetryUpdate, which strips COMMIT_KEY from the doCommit-local
+   * properties copy.
+   *
+   * @throws CommitFailedException when writer and catalog disagree on the base — retriable by
+   *     Iceberg's commit loop after the writer refreshes
+   */
+  private void abortIfWriterBaseDivergedFromCatalog(TableMetadata base, TableMetadata metadata) {
+    if (base == null || base.metadataFileLocation() == null) {
+      // No persisted catalog state to defend (initial CREATE, or mid-CREATE constructed
+      // metadata before any metadata.json has been written).
+      return;
+    }
+    if (!metadata.properties().containsKey(CatalogConstants.SNAPSHOTS_JSON_KEY)) {
+      // Not a snapshot-bearing writer commit (e.g. rename, property-only update, internal
+      // metadata-field write). These paths legitimately have no COMMIT_KEY because they don't
+      // go through OpenHouseInternalRepositoryImpl.save:187, and they don't carry the
+      // stale-snapshot-list payload that the subtractive merge would silently expire.
+      return;
+    }
+    String actualBase = base.metadataFileLocation();
+    String writerClaimedBase = metadata.properties().get(CatalogConstants.COMMIT_KEY);
+
+    if (writerClaimedBase == null) {
+      return;
+    }
+
+    if (CatalogConstants.INITIAL_VERSION.equals(writerClaimedBase)
+        || !new org.apache.hadoop.fs.Path(writerClaimedBase)
+            .toUri()
+            .getPath()
+            .equals(new org.apache.hadoop.fs.Path(actualBase).toUri().getPath())) {
+      throw new CommitFailedException(
+          "Cannot commit: writer's declared base [%s] does not match the catalog's current "
+              + "base [%s] for table %s. A concurrent commit landed between the writer's "
+              + "loadTable and commit. Refresh and retry.",
+          writerClaimedBase, actualBase, tableIdentifier);
+    }
   }
 
   /**
@@ -785,5 +844,10 @@ public class OpenHouseInternalTableOperations extends BaseMetastoreTableOperatio
     return new GsonBuilder()
         .create()
         .fromJson(serializedNewIntermediateSchemas, new TypeToken<List<String>>() {}.getType());
+  }
+
+  private TableMetadata loadTableMetadataWithCache(String metadataLocation) {
+    return tableMetadataCache.load(
+        metadataLocation, () -> TableMetadataParser.read(io(), metadataLocation));
   }
 }

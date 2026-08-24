@@ -1,6 +1,7 @@
 package com.linkedin.openhouse.tables.api.handler.impl;
 
 import com.linkedin.openhouse.common.api.spec.ApiResponse;
+import com.linkedin.openhouse.tables.api.WapBranch;
 import com.linkedin.openhouse.tables.api.handler.DatabasesApiHandler;
 import com.linkedin.openhouse.tables.api.spec.v0.request.UpdateAclPoliciesRequestBody;
 import com.linkedin.openhouse.tables.api.spec.v0.response.GetAclPoliciesResponseBody;
@@ -9,12 +10,15 @@ import com.linkedin.openhouse.tables.api.validator.DatabasesApiValidator;
 import com.linkedin.openhouse.tables.dto.mapper.DatabasesMapper;
 import com.linkedin.openhouse.tables.services.DatabasesService;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 
 @Component
 public class OpenHouseDatabasesApiHandler implements DatabasesApiHandler {
+  private static final Logger log = LoggerFactory.getLogger(OpenHouseDatabasesApiHandler.class);
   @Autowired private DatabasesService databasesService;
 
   @Autowired private DatabasesMapper databasesMapper;
@@ -71,6 +75,14 @@ public class OpenHouseDatabasesApiHandler implements DatabasesApiHandler {
       String databaseId,
       UpdateAclPoliciesRequestBody updateAclPoliciesRequestBody,
       String actingPrincipal) {
+    if (WapBranch.shouldDrop(
+        WapBranch.fromRequest(), WapBranch.fromAcl(updateAclPoliciesRequestBody))) {
+      log.info(
+          "Dropping updateDatabaseAclPolicies for non-main branch header={} body={}",
+          WapBranch.fromRequest(),
+          WapBranch.fromAcl(updateAclPoliciesRequestBody));
+      return ApiResponse.<Void>builder().httpStatus(HttpStatus.NO_CONTENT).build();
+    }
     databasesApiValidator.validateUpdateAclPolicies(databaseId, updateAclPoliciesRequestBody);
     databasesService.updateDatabaseAclPolicies(
         databaseId, updateAclPoliciesRequestBody, actingPrincipal);

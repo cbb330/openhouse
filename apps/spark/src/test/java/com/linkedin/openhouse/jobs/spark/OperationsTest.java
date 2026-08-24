@@ -14,6 +14,8 @@ import com.linkedin.openhouse.tables.client.model.Policies;
 import com.linkedin.openhouse.tables.client.model.Retention;
 import com.linkedin.openhouse.tables.client.model.TimePartitionSpec;
 import com.linkedin.openhouse.tablestest.OpenHouseSparkITest;
+import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.api.common.Attributes;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
@@ -43,6 +45,8 @@ import org.apache.spark.sql.Row;
 import org.assertj.core.util.Lists;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
+import org.mockito.Mockito;
 
 @Slf4j
 public class OperationsTest extends OpenHouseSparkITest {
@@ -306,6 +310,63 @@ public class OperationsTest extends OpenHouseSparkITest {
       }
       Assertions.assertEquals(
           table.location() + "/.backup", table.properties().get(AppConstants.BACKUP_DIR_KEY));
+    }
+  }
+
+  @Test
+  public void testRetentionWithBackupFailsWhenColumnPatternMismatchesPartition() throws Exception {
+    final String tableName = "db.test_retention_backup_pattern_mismatch";
+    OtelEmitter spyEmitter = Mockito.spy(otelEmitter);
+    try (Operations ops = Operations.withCatalog(getSparkSession(), spyEmitter)) {
+      // The table is partitioned on `datepartition`, but retention will filter
+      // on `time_col` using a pattern unrelated to the partitioning. For each
+      // file's per-file min/max to actually straddle the cutoff (and produce
+      // a non-trivial residual), both `time_col` values within a partition
+      // must live in the same data file — so we force a single writer task
+      // via the COALESCE(1) hint.
+      ops.spark().sql(String.format("DROP TABLE IF EXISTS %s", tableName)).show();
+      ops.spark()
+          .sql(
+              String.format(
+                  "CREATE TABLE %s (data string, datepartition string, time_col string) "
+                      + "PARTITIONED BY (datepartition)",
+                  tableName))
+          .show();
+      ops.spark()
+          .sql(
+              "SELECT data, datepartition, time_col FROM VALUES "
+                  + "('a', '2024-01', '2020-01-01-00'), "
+                  + "('b', '2024-01', '2030-01-01-00'), "
+                  + "('c', '2024-02', '2020-01-01-00'), "
+                  + "('d', '2024-02', '2030-01-01-00') "
+                  + "AS t(data, datepartition, time_col)")
+          .coalesce(1)
+          .writeTo(tableName)
+          .append();
+
+      // Fix `now` so the cutoff (now - 1 day, formatted yyyy-MM-dd-HH) falls
+      // strictly between each file's min ("2020-01-01-00") and max
+      // ("2030-01-01-00") — forcing a non-trivial residual on every file.
+      ZonedDateTime now = ZonedDateTime.of(2025, 6, 15, 10, 0, 0, 0, ZoneOffset.UTC);
+      IllegalStateException ex =
+          Assertions.assertThrows(
+              IllegalStateException.class,
+              () ->
+                  ops.runRetention(
+                      tableName, "time_col", "yyyy-MM-dd-HH", "day", 1, true, ".backup", now));
+      Assertions.assertTrue(
+          ex.getMessage().contains("metadata-only delete"),
+          "Expected metadata-only delete error, got: " + ex.getMessage());
+      // The misconfiguration is alertable: a metric tagged with the table name is emitted.
+      Mockito.verify(spyEmitter)
+          .count(
+              ArgumentMatchers.anyString(),
+              ArgumentMatchers.eq(AppConstants.RETENTION_POLICY_MISCONFIGURED_TABLE_COUNT),
+              ArgumentMatchers.eq(1L),
+              ArgumentMatchers.eq(
+                  Attributes.of(AttributeKey.stringKey(AppConstants.TABLE_NAME), tableName)));
+      // DELETE should not have executed: all 4 rows remain.
+      verifyRowCount(ops, tableName, 4);
     }
   }
 
@@ -703,6 +764,12 @@ public class OperationsTest extends OpenHouseSparkITest {
       // create original table and populate with multiple inserts to create snapshots
       prepareTable(ops, tableName);
       populateTable(ops, tableName, numInserts);
+
+      // RTAS is disabled by default; opt the table in before replacing it.
+      ops.spark()
+          .sql(
+              String.format(
+                  "ALTER TABLE %s SET TBLPROPERTIES ('replace.enabled'='true')", tableName));
 
       // replace the table using RTAS
       ops.spark()

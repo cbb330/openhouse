@@ -13,8 +13,9 @@ import com.linkedin.openhouse.common.stats.model.IcebergTableStats;
 import com.linkedin.openhouse.jobs.util.AppConstants;
 import com.linkedin.openhouse.jobs.util.SparkJobUtil;
 import com.linkedin.openhouse.jobs.util.TableStatsCollector;
+import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.api.common.Attributes;
 import java.io.IOException;
-import java.nio.file.Paths;
 import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.Collections;
@@ -50,6 +51,7 @@ import org.apache.iceberg.actions.RewriteDataFiles;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.expressions.Expression;
+import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.relocated.com.google.common.annotations.VisibleForTesting;
 import org.apache.iceberg.spark.actions.SparkActions;
@@ -64,6 +66,8 @@ import scala.collection.JavaConverters;
 public final class Operations implements AutoCloseable {
   // assume that catalog name is fixed
   private static final String CATALOG = "openhouse";
+
+  private static final String METRICS_SCOPE = Operations.class.getName();
 
   private final SparkSession spark;
 
@@ -339,12 +343,31 @@ public final class Operations implements AutoCloseable {
     TableScan scan = table.newScan().filter(filter);
     try (CloseableIterable<FileScanTask> filesIterable = scan.planFiles()) {
       List<FileScanTask> filesList = Lists.newArrayList(filesIterable);
+      filesList.stream()
+          .filter(task -> !Expressions.alwaysTrue().isEquivalentTo(task.residual()))
+          .findFirst()
+          .ifPresent(
+              task -> {
+                // Misconfigured table: the retention filter does not align with the partitioning,
+                // so the delete cannot be metadata-only. Emit a metric tagged with the table name
+                // so the misconfiguration can be alerted on instead of only failing the job.
+                otelEmitter.count(
+                    METRICS_SCOPE,
+                    AppConstants.RETENTION_POLICY_MISCONFIGURED_TABLE_COUNT,
+                    1,
+                    Attributes.of(AttributeKey.stringKey(AppConstants.TABLE_NAME), fqtn));
+                throw new IllegalStateException(
+                    String.format(
+                        "Retention with backup enabled requires a metadata-only delete for table %s, "
+                            + "but file %s has residual filter %s, which would require a row-level rewrite.",
+                        fqtn, task.file().path(), task.residual()));
+              });
       return filesList.stream()
           .collect(
               Collectors.groupingBy(
                   task -> {
                     String path = task.file().path().toString();
-                    return Paths.get(path).getParent().toString();
+                    return dataFileParent(path);
                   },
                   Collectors.mapping(task -> task.file().path().toString(), Collectors.toList())));
     } catch (IOException e) {
@@ -391,7 +414,20 @@ public final class Operations implements AutoCloseable {
             table.name(), AppConstants.BACKUP_DIR_KEY, fullyQualifiedBackupDir));
   }
 
-  private Path getTrashPath(String path, String filePath, String trashDir) {
+  /**
+   * Return the parent directory of a data file path. Uses Hadoop {@link Path} (not {@link
+   * java.nio.file.Paths}, which is not URI-aware) so that the scheme and authority of a
+   * fully-qualified path such as {@code hdfs://cluster/a/b/f.orc} are preserved. Dropping the
+   * authority here would later resolve the backup manifest against the default filesystem root and
+   * fail with a permission error.
+   */
+  @VisibleForTesting
+  static String dataFileParent(String dataFilePath) {
+    return new Path(dataFilePath).getParent().toString();
+  }
+
+  @VisibleForTesting
+  static Path getTrashPath(String path, String filePath, String trashDir) {
     return new Path(filePath.replace(path, new Path(path, trashDir).toString()));
   }
 
