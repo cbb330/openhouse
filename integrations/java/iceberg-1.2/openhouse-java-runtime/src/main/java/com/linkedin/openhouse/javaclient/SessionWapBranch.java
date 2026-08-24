@@ -36,7 +36,7 @@ public final class SessionWapBranch {
     }
   }
 
-  static String get() {
+  public static String get() {
     Deque<String> stack = BOUND.get();
     if (!stack.isEmpty()) {
       String top = stack.peek();

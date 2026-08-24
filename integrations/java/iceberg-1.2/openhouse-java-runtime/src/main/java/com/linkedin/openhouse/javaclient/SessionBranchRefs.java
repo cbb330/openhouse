@@ -7,8 +7,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Create a missing session branch from current main so a CI read cannot silently fall through to
- * live {@code main}. Iceberg WAP only honors {@code spark.wap.branch} when the ref exists.
+ * WAP helpers for a session branch. Iceberg creates a missing {@code spark.wap.branch} ref on
+ * commit; catalogs should {@link #enableWap} rather than pre-create. {@link #ensureFromMain} is
+ * still used when a branch must exist so DROP can empty it.
  */
 public final class SessionBranchRefs {
 
@@ -18,6 +19,33 @@ public final class SessionBranchRefs {
   private static final ThreadLocal<Boolean> ENSURING = ThreadLocal.withInitial(() -> Boolean.FALSE);
 
   private SessionBranchRefs() {}
+
+  /**
+   * Turn on {@code write.wap.enabled} so Iceberg honors {@code spark.wap.branch}. Does not create
+   * refs.
+   *
+   * @return true if the property was set (caller should reload)
+   */
+  public static boolean enableWap(Table table) {
+    if (table == null || table instanceof BaseMetadataTable) {
+      return false;
+    }
+    if (Boolean.TRUE.equals(ENSURING.get())) {
+      return false;
+    }
+    if ("true".equalsIgnoreCase(table.properties().getOrDefault(WAP_ENABLED, ""))) {
+      return false;
+    }
+    ENSURING.set(Boolean.TRUE);
+    try {
+      LOG.info("Enabling write.wap.enabled on {}", table.name());
+      table.updateProperties().set(WAP_ENABLED, "true").commit();
+      table.refresh();
+      return true;
+    } finally {
+      ENSURING.set(Boolean.FALSE);
+    }
+  }
 
   /**
    * Enable WAP and create {@code branch} from the current main snapshot when missing.

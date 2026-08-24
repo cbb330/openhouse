@@ -208,9 +208,9 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
   @Override
   public boolean dropTable(TableIdentifier identifier, boolean purge) {
     String wapBranch = sessionWapBranchOrNull();
-    if (wapBranch != null) {
+    if (WapBranchRequests.isNonMain(wapBranch)) {
       log.warn(
-          "spark.wap.branch={} is set; dropTable {} resets that branch to empty and stamps REST delete",
+          "spark.wap.branch={} is set; dropTable {} empties that branch and skips REST delete",
           wapBranch,
           identifier);
       try {
@@ -218,6 +218,7 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
       } catch (NoSuchTableException e) {
         log.debug("dropTable under branch: {} does not exist", identifier);
       }
+      return true;
     }
     log.info(
         "Calling dropTable with identifier: {}, and purge option: {}",
@@ -258,6 +259,14 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
 
   @Override
   public void renameTable(TableIdentifier from, TableIdentifier to) {
+    if (WapBranchRequests.isNonMain(SessionWapBranch.get())) {
+      log.info(
+          "Skipping renameTable for non-main WAP branch {} ({} -> {})",
+          SessionWapBranch.get(),
+          from,
+          to);
+      return;
+    }
     log.info(
         "Calling renameTable from table identifier: {}, to table identifier: {}",
         from.toString(),
@@ -433,6 +442,13 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
   @Override
   public void updateTableAclPolicies(
       TableIdentifier tableIdentifier, boolean isGrant, String privilege, String principal) {
+    if (WapBranchRequests.isNonMain(SessionWapBranch.get())) {
+      log.info(
+          "Skipping updateTableAclPolicies for non-main WAP branch {} on {}",
+          SessionWapBranch.get(),
+          tableIdentifier);
+      return;
+    }
     log.info(
         "Calling updateTableAclPolicies with identifier: {}, isGrant: {}, privilege: {}, principal: {}",
         tableIdentifier.toString(),
@@ -494,6 +510,13 @@ public class OpenHouseCatalog extends BaseMetastoreCatalog
   @Override
   public void updateDatabaseAclPolicies(
       Namespace identifier, boolean isGrant, String privilege, String principal) {
+    if (WapBranchRequests.isNonMain(SessionWapBranch.get())) {
+      log.info(
+          "Skipping updateDatabaseAclPolicies for non-main WAP branch {} on {}",
+          SessionWapBranch.get(),
+          identifier);
+      return;
+    }
     log.info(
         "Calling updateDatabaseAclPolicies with namespace: {}, isGrant: {}, privilege: {}, principal: {}",
         identifier.toString(),

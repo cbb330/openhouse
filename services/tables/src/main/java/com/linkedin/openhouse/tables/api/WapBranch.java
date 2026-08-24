@@ -6,16 +6,22 @@ import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
 
 /**
- * Session-branch target stamped by the OpenHouse Java client ({@code X-OH-Wap-Branch}, and for ACL
- * the body {@code properties.branch}). When the target is a non-main branch, identity mutations
- * (delete, rename, ACL, lock) are no-ops on the house table, and schema / user-property / policy /
- * sort updates and partition-spec eligibility are skipped on {@code updateTable} / {@code
- * putSnapshots}. Snapshots and refs still apply. The request still names the branch so a later
- * clone/branch ACL model can consume the same shape.
+ * Session-branch target stamped by the OpenHouse Java client ({@code X-OH-Wap-Branch} or Iceberg
+ * REST-shaped {@code X-Iceberg-Ref}, and for ACL the body {@code properties.branch}). Request
+ * bodies stay on the current Tables schema; Iceberg REST 1.11 would carry the same name as {@code
+ * ref} / {@code ref-name} inside commit payloads later. When the target is a non-main branch,
+ * identity mutations (delete, rename, ACL, lock) are no-ops on the house table, and schema /
+ * user-property / policy / sort updates and partition-spec eligibility are skipped on {@code
+ * updateTable} / {@code putSnapshots}. Snapshots and refs still apply.
  */
 public final class WapBranch {
 
   public static final String HEADER = "X-OH-Wap-Branch";
+  /**
+   * Alias of {@link #HEADER}; Iceberg REST 1.11 commit requirements use the field name {@code ref}.
+   */
+  public static final String ICEBERG_REF_HEADER = "X-Iceberg-Ref";
+
   public static final String ACL_PROPERTY = "branch";
 
   private WapBranch() {}
@@ -25,7 +31,12 @@ public final class WapBranch {
     if (!(attrs instanceof ServletRequestAttributes)) {
       return null;
     }
-    return blankToNull(((ServletRequestAttributes) attrs).getRequest().getHeader(HEADER));
+    javax.servlet.http.HttpServletRequest request = ((ServletRequestAttributes) attrs).getRequest();
+    String branch = blankToNull(request.getHeader(HEADER));
+    if (branch != null) {
+      return branch;
+    }
+    return blankToNull(request.getHeader(ICEBERG_REF_HEADER));
   }
 
   public static String fromAcl(UpdateAclPoliciesRequestBody body) {

@@ -26,6 +26,20 @@ class WapBranchTest {
   }
 
   @Test
+  void icebergRefHeaderIsReadWhenOhHeaderMissing() {
+    org.springframework.mock.web.MockHttpServletRequest request =
+        new org.springframework.mock.web.MockHttpServletRequest();
+    request.addHeader(WapBranch.ICEBERG_REF_HEADER, "ci");
+    org.springframework.web.context.request.RequestContextHolder.setRequestAttributes(
+        new org.springframework.web.context.request.ServletRequestAttributes(request));
+    try {
+      assertTrue(WapBranch.isNonMain(WapBranch.fromRequest()));
+    } finally {
+      org.springframework.web.context.request.RequestContextHolder.resetRequestAttributes();
+    }
+  }
+
+  @Test
   void aclBodyBranchIsDropped() {
     UpdateAclPoliciesRequestBody body =
         UpdateAclPoliciesRequestBody.builder()
