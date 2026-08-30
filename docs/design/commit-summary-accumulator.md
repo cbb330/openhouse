@@ -3,6 +3,7 @@
 ## Goals
 
 - Provide a **single, reusable core** that records a summary of what changed during an Iceberg commit without any extra metadata-table scans.
+- Use the **same object shape** that `TableStatsCollector` already produces for `CommitEventTablePartitions` and `CommitEventTablePartitionStats`.
 - Make the summary useful for multiple downstream consumers:
   1. Spark driver logs (near-term, for the testing project).
   2. `OpenHouseCommitEvent` lineage events.
@@ -18,241 +19,133 @@
 
 ## Core Idea
 
-Wrap the Iceberg `Table` returned by an OpenHouse catalog with a `CommitSummaryTable`.  The wrapper overrides the entry points that produce data-file mutations (`newAppend`, `newFastAppend`, `newOverwrite`, `newReplacePartitions`, `newDelete`, `newTransaction`) and installs small, generic interceptors around the `SnapshotUpdate` / `Transaction` objects.  As the caller adds `DataFile`s, the interceptors accumulate:
+Introduce a generic `OpenHouseTable` wrapper that delegates every `Table` method to the real table and overrides only the data-file mutation entry points (`newAppend`, `newFastAppend`, `newOverwrite`, `newReplacePartitions`, `newDelete`, `newTransaction`).  `OpenHouseTable` dispatches `OpenHouseTableListener` events for every `DataFile` added/deleted and for every successful commit or transaction commit.
 
-- a set of unique partitions,
-- total row and file counts,
-- per-column aggregates: sum of `nullCount`, min of `lowerBounds`, max of `upperBounds`.
-
-When the update or transaction commits, the wrapper builds an immutable `CommitSummary` and hands it to a `CommitSummaryListener`.  Different listeners implement the lineage-, log-, and request-attachment use cases.
+One listener, `CommitSummaryAccumulator`, collects the events into a `CommitSummary`.  `CommitSummary` is a plain POJO whose partition-level objects have the **same field layout** as `CommitEventTablePartitions` and `CommitEventTablePartitionStats`.  Other business logic can be added later as additional `OpenHouseTableListener` implementations without changing the wrapper.
 
 Because the data already flows through the driver on commit, this avoids the later `all_entries` / `data_files` / `snapshots` metadata-table scans that the current batch collectors perform.
 
 ## Proposed Module Layout
 
+Everything core lives in the existing `openhouse-java-runtime` module so it can be used by both the Java client and the Spark runtime.  Adapters that map to the existing `services:common` lineage models live in `apps/spark`, which already depends on `services:common`.
+
 ```
-libs:commit-summary                    // core, tiny dependency footprint
-├── CommitSummary                      // POJO / builder returned after commit
-├── CommitAccumulator                  // interface that accepts DataFiles
-├── DefaultCommitAccumulator           // partition + column-metric aggregation
-├── CommitSummaryListener              // callback after a commit produces a summary
-├── CommitSummaryTable                 // Table wrapper
-├── CommitSummaryAppendFiles           // AppendFiles wrapper
-├── CommitSummaryOverwriteFiles        // OverwriteFiles wrapper
-├── CommitSummaryReplacePartitions     // ReplacePartitions wrapper
-├── CommitSummaryDeleteFiles           // DeleteFiles wrapper (optional)
-└── CommitSummaryTransaction           // Transaction wrapper
+integrations/java/iceberg-1.2/openhouse-java-runtime/src/main/java/com/linkedin/openhouse/javaclient
+├── OpenHouseTable                          // generic Table wrapper
+├── OpenHouseTableListener                  // extension point
+├── OpenHouseAppendFiles                    // AppendFiles wrapper
+├── OpenHouseOverwriteFiles                // OverwriteFiles wrapper
+├── OpenHouseReplacePartitions             // ReplacePartitions wrapper
+├── OpenHouseDeleteFiles                   // DeleteFiles wrapper (optional)
+├── OpenHouseTransaction                   // Transaction wrapper
+├── CommitSummary                          // core output POJO
+├── CommitSummaryAccumulator               // OpenHouseTableListener implementation
+└── OpenHouseTableOperationsAttachmentListener // attaches summary to commit request
 
-apps/spark
-├── LogCommitSummaryListener           // prints one-line summary to driver logs
-└── OpenHouseCommitEventAdapter        // maps CommitSummary to CommitEvent* models
+apps/spark/src/main/java/com/linkedin/openhouse/jobs/util
+└── CommitSummaryToLineageAdapter          // maps CommitSummary to CommitEventTable* models
 
-integrations/java/iceberg-1.2/openhouse-java-runtime
-└── OpenHouseTableOperationsAttachmentListener  // attaches summary to commit request
+apps/spark/src/main/java/com/linkedin/openhouse/jobs/spark
+└── LogCommitSummaryListener               // prints summary to driver logs
 ```
 
-The core module should depend only on `com.linkedin.iceberg:iceberg-api` (and `iceberg-core` for `Conversions`) so it can be consumed by the Java client, the Spark runtime, and the server.
+No new Gradle module is required.  `openhouse-java-runtime` already depends on `iceberg-core`, so it has access to `Table`, `DataFile`, `PartitionSpec`, `Schema`, `Snapshot`, and `Conversions`.
 
-## Core API
+## Generic `OpenHouseTable` Wrapper
 
-### 1. CommitSummary
+`OpenHouseTable` is a generic `Table` decorator.  It forwards all `Table` methods to the delegate and overrides only the mutation entry points.  Business logic is injected via `OpenHouseTableListener`.
 
 ```java
-@Data
-@Builder(toBuilder = true)
-@NoArgsConstructor(access = AccessLevel.PRIVATE)
-@AllArgsConstructor(access = AccessLevel.PRIVATE)
-public class CommitSummary implements Serializable {
-  private String tableName;
-  private long snapshotId;
-  private String operation;            // e.g. "append", "overwrite", "replace"
-  private long commitTimestampMs;
-  private long addedRecords;
-  private int addedDataFiles;
-  private Set<PartitionKey> partitions;
-  private Map<String, ColumnMetrics> columnMetrics;          // table-level aggregate
-  private Map<PartitionKey, Map<String, ColumnMetrics>> partitionColumnMetrics;
+package com.linkedin.openhouse.javaclient;
+
+import org.apache.iceberg.Table;
+import org.apache.iceberg.AppendFiles;
+import org.apache.iceberg.OverwriteFiles;
+import org.apache.iceberg.ReplacePartitions;
+import org.apache.iceberg.DeleteFiles;
+import org.apache.iceberg.Transaction;
+import org.apache.iceberg.Snapshot;
+import org.apache.iceberg.DataFile;
+
+public interface OpenHouseTableListener {
+  default void onDataFileAdded(DataFile dataFile, OpenHouseTable table, OperationType operation) {}
+  default void onDataFileDeleted(DataFile dataFile, OpenHouseTable table, OperationType operation) {}
+  default void onCommit(Snapshot snapshot, OpenHouseTable table, OperationType operation) {}
 }
-```
 
-`PartitionKey` is a small, immutable, hashable wrapper around the ordered partition column values:
-
-```java
-@Value
-public class PartitionKey {
-  List<String> names;
-  List<Object> values;
-}
-```
-
-`ColumnMetrics` keeps raw min/max values as `Object` so adapters can convert them to the right `ColumnData` subtype:
-
-```java
-@Data
-@Builder
-public class ColumnMetrics {
-  private String columnName;
-  private long nullCount;
-  private long valueCount;
-  private Object minValue;
-  private Object maxValue;
-}
-```
-
-### 2. CommitAccumulator
-
-```java
-public interface CommitAccumulator {
-  void observeAdded(DataFile dataFile, PartitionSpec spec, Schema schema);
-  void observeDeleted(DataFile dataFile, PartitionSpec spec, Schema schema);
-  CommitSummary summarize(Table table, Snapshot snapshot);
-  void reset();
-}
-```
-
-`DefaultCommitAccumulator` is the generic implementation.  For each `DataFile` it:
-
-1. Builds a `PartitionKey` from `dataFile.partition()` using `spec.fields()`.
-2. Adds the `PartitionKey` to a `Set` and to a per-partition metrics map.
-3. For each field id in `dataFile.nullCounts()` it adds to `nullCount`.
-4. For each field id in `dataFile.lowerBounds()` / `upperBounds()` it converts the `ByteBuffer` to a Java value with `org.apache.iceberg.types.Conversions.fromByteBuffer(field.type(), buffer)` and merges using `Comparable`.
-
-```java
-public class DefaultCommitAccumulator implements CommitAccumulator {
-  private long totalRecords;
-  private int totalFiles;
-  private final Set<PartitionKey> partitions = new HashSet<>();
-  private final Map<PartitionKey, PartitionAccumulator> partitionAccumulators = new HashMap<>();
-  private final ColumnMetricAccumulator tableMetrics = new ColumnMetricAccumulator();
-
-  @Override
-  public void observeAdded(DataFile dataFile, PartitionSpec spec, Schema schema) {
-    totalFiles++;
-    totalRecords += dataFile.recordCount();
-    PartitionKey key = partitionKey(dataFile, spec);
-    partitions.add(key);
-    partitionAccumulators.computeIfAbsent(key, k -> new PartitionAccumulator()).add(dataFile, schema);
-    tableMetrics.add(dataFile, schema);
-  }
-
-  @Override
-  public CommitSummary summarize(Table table, Snapshot snapshot) {
-    return CommitSummary.builder()
-        .tableName(table.name())
-        .snapshotId(snapshot.snapshotId())
-        .operation(snapshot.summary().get("operation"))
-        .commitTimestampMs(snapshot.timestampMillis())
-        .addedRecords(totalRecords)
-        .addedDataFiles(totalFiles)
-        .partitions(Collections.unmodifiableSet(partitions))
-        .columnMetrics(tableMetrics.toMap())
-        .partitionColumnMetrics(
-            partitionAccumulators.entrySet().stream()
-                .collect(Collectors.toMap(Map.Entry::getKey, e -> e.getValue().toMap())))
-        .build();
-  }
-}
-```
-
-### 3. CommitSummaryListener
-
-```java
-@FunctionalInterface
-public interface CommitSummaryListener {
-  void onCommit(CommitSummary summary);
-}
-```
-
-Multiple listeners can be composed:
-
-```java
-public class CompositeCommitSummaryListener implements CommitSummaryListener {
-  private final List<CommitSummaryListener> listeners;
-  @Override public void onCommit(CommitSummary summary) {
-    listeners.forEach(l -> l.onCommit(summary));
-  }
-}
-```
-
-## Wrapped Table and SnapshotUpdate Interceptors
-
-`CommitSummaryTable` delegates every `Table` method to the real table and overrides only the mutation entry points.  The interceptors are thin; they observe `DataFile`s and publish a summary after `commit()` / `commitTransaction()`.
-
-```java
-public class CommitSummaryTable implements Table {
+public class OpenHouseTable implements Table {
   private final Table delegate;
-  private final Supplier<CommitAccumulator> accumulatorFactory;
-  private final CommitSummaryListener listener;
+  private final String clusterName;
+  private final List<OpenHouseTableListenerFactory> listenerFactories;
 
-  // --- forwarding implementations for all Table methods ---
+  // ... constructor and all Table delegate methods ...
 
   @Override
   public AppendFiles newAppend() {
-    CommitAccumulator acc = accumulatorFactory.get();
-    return new CommitSummaryAppendFiles(delegate.newAppend(), this, acc, CommitOperation.APPEND);
+    return new OpenHouseAppendFiles(delegate.newAppend(), this, OperationType.APPEND, createListeners());
   }
 
   @Override
   public AppendFiles newFastAppend() {
-    CommitAccumulator acc = accumulatorFactory.get();
-    return new CommitSummaryAppendFiles(delegate.newFastAppend(), this, acc, CommitOperation.APPEND);
+    return new OpenHouseAppendFiles(delegate.newFastAppend(), this, OperationType.APPEND, createListeners());
   }
 
   @Override
   public OverwriteFiles newOverwrite() {
-    CommitAccumulator acc = accumulatorFactory.get();
-    return new CommitSummaryOverwriteFiles(delegate.newOverwrite(), this, acc, CommitOperation.OVERWRITE);
+    return new OpenHouseOverwriteFiles(delegate.newOverwrite(), this, OperationType.OVERWRITE, createListeners());
   }
 
   @Override
   public ReplacePartitions newReplacePartitions() {
-    CommitAccumulator acc = accumulatorFactory.get();
-    return new CommitSummaryReplacePartitions(delegate.newReplacePartitions(), this, acc, CommitOperation.REPLACE);
+    return new OpenHouseReplacePartitions(delegate.newReplacePartitions(), this, OperationType.REPLACE, createListeners());
   }
 
   @Override
   public DeleteFiles newDelete() {
-    CommitAccumulator acc = accumulatorFactory.get();
-    return new CommitSummaryDeleteFiles(delegate.newDelete(), this, acc, CommitOperation.DELETE);
+    return new OpenHouseDeleteFiles(delegate.newDelete(), this, OperationType.DELETE, createListeners());
   }
 
   @Override
   public Transaction newTransaction() {
-    CommitAccumulator acc = accumulatorFactory.get();
-    return new CommitSummaryTransaction(delegate.newTransaction(), this, acc);
+    List<OpenHouseTableListener> txListeners = createListeners();
+    return new OpenHouseTransaction(delegate.newTransaction(), this, txListeners);
   }
 
-  void publish(CommitAccumulator accumulator) {
-    Snapshot snapshot = delegate.currentSnapshot();
-    if (snapshot == null) {
-      return;
-    }
-    CommitSummary summary = accumulator.summarize(delegate, snapshot);
-    listener.onCommit(summary);
+  private List<OpenHouseTableListener> createListeners() {
+    return listenerFactories.stream()
+        .map(OpenHouseTableListenerFactory::create)
+        .collect(Collectors.toList());
   }
 }
 ```
 
-`CommitSummaryAppendFiles` is representative:
+`OpenHouseTableListenerFactory` creates a fresh listener instance for each operation (or a single shared instance for a transaction).  This keeps state isolated between commits.
 
 ```java
-public class CommitSummaryAppendFiles implements AppendFiles {
+public interface OpenHouseTableListenerFactory {
+  OpenHouseTableListener create();
+}
+```
+
+`OpenHouseAppendFiles` is representative:
+
+```java
+public class OpenHouseAppendFiles implements AppendFiles {
   private final AppendFiles delegate;
-  private final CommitSummaryTable table;
-  private final CommitAccumulator accumulator;
+  private final OpenHouseTable table;
+  private final OperationType operation;
+  private final List<OpenHouseTableListener> listeners;
 
   @Override
   public AppendFiles appendFile(DataFile file) {
-    accumulator.observeAdded(file, table.spec(), table.schema());
+    listeners.forEach(l -> l.onDataFileAdded(file, table, operation));
     delegate.appendFile(file);
     return this;
   }
 
   @Override
   public AppendFiles appendFiles(Iterable<DataFile> files) {
-    for (DataFile file : files) {
-      accumulator.observeAdded(file, table.spec(), table.schema());
-    }
+    files.forEach(f -> listeners.forEach(l -> l.onDataFileAdded(f, table, operation)));
     delegate.appendFiles(files);
     return this;
   }
@@ -260,40 +153,136 @@ public class CommitSummaryAppendFiles implements AppendFiles {
   @Override
   public void commit() {
     delegate.commit();
-    table.publish(accumulator);
+    listeners.forEach(l -> l.onCommit(table.currentSnapshot(), table, operation));
   }
 
-  // ... delegate all other SnapshotUpdate methods (set, deleteWith, etc.)
+  // ... delegate all other SnapshotUpdate methods ...
 }
 ```
 
-`CommitSummaryTransaction` is similar but shares a single `CommitAccumulator` among the inner `newAppend` / `newOverwrite` / `newReplacePartitions` calls and publishes once in `commitTransaction()`.
+`OpenHouseTransaction` creates the same inner wrappers but shares one listener list across the transaction and fires `onCommit` once in `commitTransaction()` with the final snapshot and `OperationType.MIXED`.
 
-## Where to Install the Wrapper
+This design makes `OpenHouseTable` a generic hook point for future OpenHouse business logic (e.g., policy checks, client-side metrics, request enrichment) without changing the wrapper class each time.
 
-### Spark driver / testing project
+## `CommitSummary` Shape
 
-`OpenHouseCatalog` (both `integrations/java/iceberg-1.2` and `iceberg-1.5`) returns the table from `BaseMetastoreCatalog`.  Override `loadTable` to wrap it:
+`CommitSummary` is intentionally a plain POJO that mirrors the field layout of `CommitEventTablePartitions` and `CommitEventTablePartitionStats` from `services:common`.  It lives in `openhouse-java-runtime` so the client jar does not have to depend on `services:common`.
+
+```java
+@Data
+@Builder
+public class CommitSummary {
+  // table / commit identification (same fields as BaseTableIdentifier + CommitMetadata)
+  private String databaseName;
+  private String tableName;
+  private String clusterName;
+  private String tableLocation;
+  private String partitionSpec;
+  private long commitId;                 // snapshot id
+  private long commitTimestampMs;
+  private String commitAppId;
+  private String commitAppName;
+  private String commitOperation;        // e.g. "APPEND", "OVERWRITE"
+  private long eventTimestampMs;
+
+  // one entry per unique partition affected by the commit
+  private List<CommitSummaryPartition> partitions;
+}
+```
+
+```java
+@Data
+@Builder
+public class CommitSummaryPartition {
+  // matches CommitEventTablePartitions.partitionData
+  private List<CommitSummaryColumnData> partitionData;
+
+  // matches CommitEventTablePartitionStats
+  private long rowCount;
+  private long columnCount;
+  private List<CommitSummaryColumnData> nullCount;
+  private List<CommitSummaryColumnData> nanCount;
+  private List<CommitSummaryColumnData> minValue;
+  private List<CommitSummaryColumnData> maxValue;
+  private List<CommitSummaryColumnData> columnSizeInBytes;
+}
+```
+
+```java
+@Data
+@Builder
+public class CommitSummaryColumnData {
+  private String columnName;
+  private Object value;  // typed Long, Double, or String; adapters convert to ColumnData subclasses
+}
+```
+
+The per-partition object contains both the partition values (`partitionData`) and the stats, so a single `CommitSummaryPartition` can be mapped to both `CommitEventTablePartitions` and `CommitEventTablePartitionStats` by selecting the relevant fields.
+
+## `CommitSummaryAccumulator`
+
+`CommitSummaryAccumulator` implements `OpenHouseTableListener` and builds the `CommitSummary`.
+
+```java
+public class CommitSummaryAccumulator implements OpenHouseTableListener {
+  private final PartitionKeyAccumulator partitions = new PartitionKeyAccumulator();
+  private final ColumnMetricAccumulator tableMetrics = new ColumnMetricAccumulator();
+  private final Map<PartitionKey, ColumnMetricAccumulator> partitionMetrics = new HashMap<>();
+
+  @Override
+  public void onDataFileAdded(DataFile dataFile, OpenHouseTable table, OperationType operation) {
+    PartitionKey key = PartitionKey.from(dataFile.partition(), table.spec());
+    partitions.add(key, dataFile.recordCount());
+    tableMetrics.add(dataFile, table.schema());
+    partitionMetrics.computeIfAbsent(key, k -> new ColumnMetricAccumulator()).add(dataFile, table.schema());
+  }
+
+  @Override
+  public void onCommit(Snapshot snapshot, OpenHouseTable table, OperationType operation) {
+    CommitSummary summary = buildSummary(snapshot, table);
+    // hand-off to a downstream sink (configured via the listener factory)
+    sink.publish(summary);
+  }
+}
+```
+
+`ColumnMetricAccumulator` extracts values from `DataFile.nullCounts()`, `DataFile.nanCounts()`, `DataFile.lowerBounds()`, `DataFile.upperBounds()`, and `DataFile.columnSizes()` and merges them per column:
+
+- `nullCount` and `nanCount`: sum across files.
+- `columnSizeInBytes`: sum across files.
+- `minValue`: minimum of `lowerBounds` values.
+- `maxValue`: maximum of `upperBounds` values.
+
+Values are converted from `ByteBuffer` using `org.apache.iceberg.types.Conversions.fromByteBuffer(Type, ByteBuffer)` and compared as `Comparable`.  The type-to-Java mapping matches `TableStatsCollectorUtil.convertValueToColumnData` (integer/long/date/time → `Long`, float/double/decimal → `Double`, everything else → `String`) so the adapter can trivially wrap them in `ColumnData.LongColumnData`, `ColumnData.DoubleColumnData`, or `ColumnData.StringColumnData`.
+
+`commitAppId` and `commitAppName` are populated from `Snapshot.summary()` exactly like `TableStatsCollectorUtil` does today:
+
+- `commitAppId`: first non-null of `spark.app.id` or `trino_query_id`.
+- `commitAppName`: `spark.app.name` when `spark.app.id` is present, otherwise `trino`.
+
+## Where to Install `OpenHouseTable`
+
+### Java / Spark client
+
+`OpenHouseCatalog` already builds `OpenHouseTableOperations`.  Override `loadTable` to wrap the returned `Table` with `OpenHouseTable`:
 
 ```java
 @Override
 public Table loadTable(TableIdentifier identifier) {
   Table table = super.loadTable(identifier);
-  return CommitSummaryTable.builder()
+  return OpenHouseTable.builder()
       .delegate(table)
-      .accumulatorFactory(DefaultCommitAccumulator::new)
-      .listener(new CompositeCommitSummaryListener(
-          new LogCommitSummaryListener(),
-          new OpenHouseCommitEventAdapter(cluster, ...)))
+      .clusterName(cluster)
+      .listenerFactory(() -> new CommitSummaryAccumulator(new LogCommitSummarySink()))
       .build();
 }
 ```
 
-For the testing project the listener list can start with only `LogCommitSummaryListener`.
+The factory can be extended later to include other listeners.
 
 ### OpenHouse internal catalog
 
-`OpenHouseInternalCatalog` can use the same core but with a listener that writes the summary to a `ThreadLocal` so `OpenHouseInternalTableOperations.doCommit` can read it and attach it to the server-side commit handling.
+`OpenHouseInternalCatalog` can use the same `OpenHouseTable` wrapper if it wants driver-side accumulation.  More importantly, `OpenHouseInternalTableOperations` should be able to read a `CommitSummary` sent by the client and attach it to the existing `CommitEvent` publishing path.  The wire format is discussed below.
 
 ## Adapter Examples
 
@@ -301,55 +290,50 @@ For the testing project the listener list can start with only `LogCommitSummaryL
 
 ```java
 @Slf4j
-public class LogCommitSummaryListener implements CommitSummaryListener {
+public class LogCommitSummarySink implements CommitSummarySink {
   @Override
-  public void onCommit(CommitSummary summary) {
+  public void publish(CommitSummary summary) {
     log.info(
-        "CommitSummary table={} snapshot={} operation={} addedFiles={} addedRecords={} partitions={} columnMetrics={}",
+        "CommitSummary table={}.{} snapshot={} op={} files={} rows={} partitions={}",
+        summary.getDatabaseName(),
         summary.getTableName(),
-        summary.getSnapshotId(),
-        summary.getOperation(),
-        summary.getAddedDataFiles(),
-        summary.getAddedRecords(),
+        summary.getCommitId(),
+        summary.getCommitOperation(),
         summary.getPartitions().size(),
-        summary.getColumnMetrics());
+        summary.getPartitions().stream().mapToLong(CommitSummaryPartition::getRowCount).sum(),
+        summary.getPartitions().size());
   }
 }
 ```
 
-For the testing project this is the primary consumer: one compact line per commit in the driver log with partition count and null/min/max aggregates.
+This is the near-term consumer for the testing project: one compact line per commit in the driver log.
 
 ### 2. OpenHouseCommitEvent adapter
 
-`OpenHouseCommitEventAdapter` maps the generic `CommitSummary` to the existing lineage models in `com.linkedin.openhouse.common.stats.model`:
+`CommitSummaryToLineageAdapter` in `apps/spark` maps `CommitSummary` to the existing `CommitEventTablePartitions` and `CommitEventTablePartitionStats` models.  The mapping is 1:1 because the field names and value types already match.  The adapter supplies the `BaseTableIdentifier` and `CommitMetadata` objects from `CommitSummary`'s top-level fields and converts each `CommitSummaryColumnData` to the appropriate `ColumnData` subclass.
 
-- `CommitEventTable` from the top-level snapshot/operation.
-- `CommitEventTablePartitions` from `summary.getPartitions()`.
-- `CommitEventTablePartitionStats` from `summary.getPartitionColumnMetrics()` and `summary.getColumnMetrics()` for unpartitioned tables.
+### 3. `OpenHouseTableOperations` request attachment
 
-It stays isolated in `apps/spark` (or `services/common`) so `libs:commit-summary` never depends on lineage POJOs.
+`OpenHouseTableOperationsAttachmentListener` holds a reference to a `ThreadLocal` or to `OpenHouseTableOperations` itself.  In `publish(CommitSummary)` it serializes the summary to JSON and makes it available to `OpenHouseTableOperations.doCommit`, which then attaches it to the commit request.
 
-### 3. OpenHouseTableOperations request attachment
+Wire-format options:
 
-`OpenHouseTableOperationsAttachmentListener` holds a reference to the `OpenHouseTableOperations` (or a `ThreadLocal` slot) and, in `onCommit`, serializes `CommitSummary` to JSON and sets it as a transient property on the next commit request.
-
-Design options for the wire format:
-
-1. **Property bag (no API change).**  Add `openhouse.commitSummary = <json>` to `metadata.properties()` before `doCommit`.  `OpenHouseInternalTableOperations` can read and strip it.  This reuses the existing `CreateUpdateTableRequestBody.tableProperties` / `IcebergSnapshotsRequestBody` flow but introduces a property that briefly lives in table metadata.
-2. **Dedicated request field (cleaner).**  Add an optional `commitSummary` string field to `CreateUpdateTableRequestBody` and `IcebergSnapshotsRequestBody` in the OpenAPI spec.  `OpenHouseTableOperations` attaches the JSON there, and the server parses it in `doCommit`.
+1. **Property bag (no API change).**  Add `openhouse.commitSummary = <json>` to the table properties before `doCommit`.  `OpenHouseInternalTableOperations` can read and strip it.  This reuses the existing `CreateUpdateTableRequestBody.tableProperties` / `IcebergSnapshotsRequestBody` flow but introduces a property that briefly lives in table metadata.
+2. **Dedicated request field (cleaner long-term).**  Add an optional `commitSummary` string field to `CreateUpdateTableRequestBody` and `IcebergSnapshotsRequestBody` in the OpenAPI spec.  `OpenHouseTableOperations` attaches the JSON there, and the server parses it in `doCommit`.
 
 The property-bag approach can be used immediately for the testing project; the dedicated-field approach should be the long-term shape.
 
 ## Why This Avoids Extra Work
 
-- **No extra I/O:** the `DataFile` objects and their metrics (`nullCounts`, `lowerBounds`, `upperBounds`) are already in memory on the driver when `appendFile` is called.  We observe them there instead of scanning `all_entries` / `data_files` later.
+- **No extra I/O:** the `DataFile` objects and their metrics (`nullCounts`, `lowerBounds`, `upperBounds`, `nanCounts`, `columnSizes`) are already in memory on the driver when `appendFile` is called.  We observe them there instead of scanning `all_entries` / `data_files` later.
 - **Minimal compute:** aggregation is `O(files × columns)` with simple `HashMap` / `HashSet` updates.  The only conversion is `Conversions.fromByteBuffer` per bound, which Iceberg already does internally for metadata-table reads.
 - **Pluggable sinks:** the same accumulator feeds logs, events, and server requests without re-implementation.
+- **Extensible wrapper:** `OpenHouseTable` is a generic hook point; the commit summary is one `OpenHouseTableListener` among potential future OpenHouse business logic.
 
 ## Open Questions
 
 1. Should deletes be tracked as negative row/bound/null contributions, or simply ignored in the first version?
-2. For transactions that mix `append` and `delete`, should the published `operation` be derived from `Snapshot.summary()` or from the dominant observed operation?
-3. How should `PartitionKey` be serialized in the request attachment so the server can reconstruct typed `ColumnData` without the original `PartitionSpec`?
-4. Where should the core module live: a new `libs:commit-summary` or inside `services:common`?
-5. Do we want the wrapper to be enabled by default in `OpenHouseCatalog`, or gated by a catalog property such as `openhouse.commit-summary.enabled`?
+2. For `OpenHouseTable` to know `clusterName`, `OpenHouseCatalog` must pass it in.  Is `cluster` always available in the catalog properties?
+3. Should the final `CommitSummary` include a top-level object for unpartitioned tables (one `CommitSummaryPartition` with `partitionData = null`) or a separate unpartitioned summary object?
+4. How should the server parse the attached `CommitSummary` and route it to the existing `CommitEvent` publishing pipeline?
+5. Does `openhouse-java-runtime` need to shade any new classes, or will the existing shadow configuration handle `CommitSummary` automatically?
