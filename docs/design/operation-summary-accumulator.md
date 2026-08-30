@@ -447,6 +447,69 @@ Wire-format options:
 
 The property-bag approach can be used immediately for the testing project; the dedicated-field approach should be the long-term shape.
 
+## Alternative Architecture: Event-Stream Pipeline
+
+The wrapped-accumulator design above is optimized for a quick, driver-side win.  For enterprise lineage, observability, and datalake health at scale, the same `OpenHouseTable` wrapper should be treated as a **raw telemetry emitter** and the aggregation/queryability concerns should move to a streaming/ETL layer.
+
+### 1. Emit immutable `TableOperationEvent`s from the wrapper
+
+Instead of accumulating a giant per-operation summary in the driver, `OpenHouseTableListener` emits small, immutable events:
+
+- `DataFileAdded` — one per file added during a commit.
+- `DataFileDeleted` — one per file deleted during a commit.
+- `DataFileScanned` — one per file returned by `planFiles()` in a scan.
+- `CommitCompleted` — one per successful commit.
+- `ScanCompleted` — one per completed scan (after the `CloseableIterable` is closed).
+
+Each event is self-identifying: database/table/cluster, table UUID, table location, snapshot id, operation type, application id/name, event timestamp, file path, record count, file size, and partition values.  Column-level metrics can be attached to `DataFile*` events as a small, per-file payload so the downstream stats store can aggregate them incrementally.
+
+```java
+public interface TableOperationEventSink {
+  void emit(TableOperationEvent event);
+}
+```
+
+`OpenHouseTableListener` implementations (`CommitEventEmitter`, `ScanEventEmitter`) forward events to this sink.  Sinks include `KafkaTableOperationEventSink`, `LogTableOperationEventSink`, and `OpenHouseTableOperationsAttachmentSink`.
+
+### 2. The server/catalog owns the authoritative operation log
+
+`OpenHouseTableOperationsAttachmentSink` serializes the event list (or a compact commit summary) and attaches it to the `CreateUpdateTableRequestBody` / `IcebergSnapshotsRequestBody`.  `OpenHouseInternalTableOperations` writes the events into an append-only `table_operation_log` (an Iceberg table or a relational table).  This makes the server the source of truth and avoids trusting the client for aggregate statistics used by the optimizer.
+
+### 3. Stream / ETL into flat service datalake tables
+
+A streaming job consumes the operation-log topic/table and writes normalized, queryable tables:
+
+| Table | Granularity | Purpose |
+|-------|-------------|---------|
+| `table_commit_events` | one row per commit | lineage/audit: who changed the table, when, and how |
+| `table_commit_file_events` | one row per file added/deleted | file-level provenance; derives partition-level stats |
+| `table_scan_events` | one row per scan | read lineage: query id, app, snapshot, filter, files touched, rows read |
+| `table_partition_column_metrics` | one row per `(table, partition, column, metric, snapshot, value)` | health/observability time-series |
+
+The health table is deliberately flat.  Queries like `WHERE column_name = 'x' AND metric_name = 'null_count'` run on indexed columns without needing to `explode` nested arrays.  Partition values are stored as a stable `partition_key` string (or a map column) so the schema does not change when partition specs evolve.
+
+### 4. Compute stats incrementally, reconcile periodically
+
+The ETL maintains per-partition, per-column aggregates from `table_commit_file_events`:
+
+- `nullCount` and `nanCount` are summed from file metrics.
+- `columnSizeInBytes` is summed.
+- `minValue` / `maxValue` are recomputed from the remaining files for affected partitions.
+- Deletes are applied by updating the aggregate; a nightly reconciliation job (similar to the existing `TableStatsCollectionSparkApp`) recomputes from Iceberg metadata and corrects drift.
+
+This separates the **fast path** (incremental updates from events) from the **correctness path** (periodic full recomputation).
+
+### 5. Preserve existing models as derived views
+
+`CommitEventTablePartitions` and `CommitEventTablePartitionStats` can be produced by a batch job or a view that aggregates `table_commit_file_events` and `table_partition_column_metrics`.  The legacy models become query-time projections, not the canonical storage shape.
+
+### Trade-offs
+
+- **Pros:** events are small and Kafka-friendly; service tables are flat and indexed; lineage, health, and audit are decoupled; the server is authoritative.
+- **Cons:** it requires Kafka (or an equivalent operation log), a streaming/ETL job, and a state store for incremental aggregates.  It is more infrastructure than the single wrapped-accumulator POJO.
+
+For the immediate driver-log use case, keep the simple `OpenHouseTableSummaryAccumulator`.  For long-term enterprise lineage and datalake health, evolve toward this event-stream pipeline.
+
 ## Why This Avoids Extra Work
 
 - **No extra I/O:** the `DataFile` objects and their metrics (`nullCounts`, `lowerBounds`, `upperBounds`, `nanCounts`, `columnSizes`) are already in memory on the driver when `appendFile` is called and during `planFiles()` in a scan.  We observe them there instead of scanning `all_entries` / `data_files` later.
