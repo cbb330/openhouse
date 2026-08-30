@@ -45,7 +45,7 @@ integrations/java/iceberg-1.2/openhouse-java-runtime/src/main/java/com/linkedin/
 ├── OpenHouseTableSummary                  // core output POJO
 ├── OpenHouseTableSummarySink              // sink interface for summaries
 ├── OpenHouseTableSummaryAccumulator       // OpenHouseTableListener implementation
-└── OpenHouseTableOperationsAttachmentListener // attaches summary to commit request
+└── OpenHouseTableOperationsAttachmentListener // attaches operation summary to commit request
 
 apps/spark/src/main/java/com/linkedin/openhouse/jobs/util
 └── OpenHouseTableSummaryToLineageAdapter          // maps OpenHouseTableSummary to CommitEventTable* models
@@ -438,12 +438,12 @@ This adapter is only used for commit operations; scan summaries are routed to th
 
 ### 3. `OpenHouseTableOperations` request attachment
 
-`OpenHouseTableOperationsAttachmentListener` holds a reference to a `ThreadLocal` or to `OpenHouseTableOperations` itself.  In `publish(OpenHouseTableSummary)` it serializes the summary to JSON and makes it available to `OpenHouseTableOperations.doCommit`, which then attaches it to the commit request.
+`OpenHouseTableOperationsAttachmentListener` holds a reference to a `ThreadLocal` or to `OpenHouseTableOperations` itself.  In `publish(OpenHouseTableSummary)` it serializes the operation summary to JSON and makes it available to `OpenHouseTableOperations.doCommit`, which then attaches it to the commit request.
 
 Wire-format options:
 
-1. **Property bag (no API change).**  Add `openhouse.commitSummary = <json>` to the table properties before `doCommit`.  `OpenHouseInternalTableOperations` can read and strip it.  This reuses the existing `CreateUpdateTableRequestBody.tableProperties` / `IcebergSnapshotsRequestBody` flow but introduces a property that briefly lives in table metadata.
-2. **Dedicated request field (cleaner long-term).**  Add an optional `commitSummary` string field to `CreateUpdateTableRequestBody` and `IcebergSnapshotsRequestBody` in the OpenAPI spec.  `OpenHouseTableOperations` attaches the JSON there, and the server parses it in `doCommit`.
+1. **Property bag (no API change).**  Add `openhouse.operationSummary = <json>` to the table properties before `doCommit`.  `OpenHouseInternalTableOperations` can read and strip it.  This reuses the existing `CreateUpdateTableRequestBody.tableProperties` / `IcebergSnapshotsRequestBody` flow but introduces a property that briefly lives in table metadata.
+2. **Dedicated request field (cleaner long-term).**  Add an optional `operationSummary` string field to `CreateUpdateTableRequestBody` and `IcebergSnapshotsRequestBody` in the OpenAPI spec.  `OpenHouseTableOperations` attaches the JSON there, and the server parses it in `doCommit`.
 
 The property-bag approach can be used immediately for the testing project; the dedicated-field approach should be the long-term shape.
 
