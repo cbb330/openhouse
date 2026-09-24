@@ -2,13 +2,13 @@ package com.linkedin.openhouse.tables.readbridge;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.linkedin.openhouse.tables.model.TableDto;
+import com.linkedin.openhouse.tables.readbridge.ColumnDefaultException.Origin;
 import com.linkedin.openhouse.tables.readbridge.ColumnDefaultException.Reason;
 import com.linkedin.openhouse.tables.toggle.TableFeatureToggle;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.reactive.function.client.WebClientRequestException;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 
@@ -16,7 +16,6 @@ import org.springframework.web.reactive.function.client.WebClientResponseExcepti
  * Stamps per-table {@code config} for read-bridge capabilities. Owns policy (feature id, ramp,
  * keys); deployments supply data via {@link ColumnDefaultsSource}.
  */
-@Slf4j
 public class ReadBridgeConfigResolver {
 
   /** Capability id; also names {@code <id>.enabled} and the config key prefix below. */
@@ -36,18 +35,25 @@ public class ReadBridgeConfigResolver {
     this.featureToggle = Objects.requireNonNull(featureToggle, "featureToggle");
   }
 
-  /** Merges independently gated capabilities; empty when nothing is bridged. */
-  public Map<String, String> resolve(TableDto tableDto) {
-    Objects.requireNonNull(tableDto, "tableDto");
+  /** Stamps stored defaults; an unusable source or ramp lookup fails the read. */
+  public Map<String, String> resolve(TableDto tableDto) throws ColumnDefaultException {
+    Map<Integer, String> byId;
+    try {
+      byId = stampedColumnDefaults(tableDto);
+    } catch (ColumnDefaultException e) {
+      throw e.withOrigin(Origin.STORED);
+    }
+    if (byId.isEmpty()) {
+      return Collections.emptyMap();
+    }
     Map<String, String> config = new HashMap<>();
-    config.putAll(columnDefaultConfig(tableDto));
+    byId.forEach((fieldId, json) -> config.put(COLUMN_DEFAULT_PREFIX + fieldId, json));
     return config;
   }
 
   /**
-   * Write-path stamps, keyed by Iceberg field-id. Empty when there is no source or the table is not
-   * ramped. Toggle or source failure throws — the write path fail-closes; {@link #resolve} does
-   * not.
+   * Stamps keyed by Iceberg field-id. Empty when there is no source or the table is not ramped.
+   * Toggle or source failures propagate on both reads and writes.
    *
    * @throws ColumnDefaultException if the source or ramp lookup cannot answer
    */
@@ -72,35 +78,6 @@ public class ReadBridgeConfigResolver {
     return isColumnDefaultRamped(tableDto);
   }
 
-  private Map<String, String> columnDefaultConfig(TableDto tableDto) {
-    Map<Integer, String> byId;
-    try {
-      byId = stampedColumnDefaults(tableDto);
-    } catch (ColumnDefaultException e) {
-      if (e.getReason() == Reason.INTERNAL) {
-        log.error(
-            "Column-default source failed unexpectedly for {}.{}",
-            tableDto.getDatabaseId(),
-            tableDto.getTableId(),
-            e);
-      } else {
-        log.debug(
-            "Column-default bridge omitted for {}.{}: {}",
-            tableDto.getDatabaseId(),
-            tableDto.getTableId(),
-            e.getReason(),
-            e);
-      }
-      return Collections.emptyMap();
-    }
-    if (byId.isEmpty()) {
-      return Collections.emptyMap();
-    }
-    Map<String, String> config = new HashMap<>();
-    byId.forEach((fieldId, json) -> config.put(COLUMN_DEFAULT_PREFIX + fieldId, json));
-    return config;
-  }
-
   private Map<Integer, String> columnDefaultsByFieldId(TableDto tableDto)
       throws ColumnDefaultException {
     if (columnDefaultsSource == ColumnDefaultsSource.NONE) {
@@ -109,24 +86,25 @@ public class ReadBridgeConfigResolver {
     if (!isColumnDefaultRamped(tableDto)) {
       return Collections.emptyMap();
     }
-    Map<Integer, JsonNode> columnDefaults = columnDefaultsSource.defaults(tableDto);
-    if (columnDefaults == null || columnDefaults.isEmpty()) {
+    Map<Integer, JsonNode> columnDefaults =
+        Objects.requireNonNull(
+            columnDefaultsSource.defaults(tableDto), "Column-default source returned null");
+    if (columnDefaults.isEmpty()) {
       return Collections.emptyMap();
     }
     Map<Integer, String> byId = new HashMap<>();
     columnDefaults.forEach(
-        (fieldId, value) -> {
-          if (fieldId != null && value != null) {
-            byId.put(fieldId, value.toString());
-          }
-        });
+        (fieldId, value) ->
+            byId.put(
+                Objects.requireNonNull(fieldId, "Column-default field id is null"),
+                Objects.requireNonNull(value, "Column-default value is null").toString()));
     return byId;
   }
 
   /**
    * Uses {@link TableFeatureToggle#isFeatureActivatedWithOverride} so {@code
-   * read-bridge.column-default.enabled} can opt in/out without HTS. GET fail-opens on lookup
-   * errors: not bridging equals today's NULL reads. The write path fail-closes instead.
+   * read-bridge.column-default.enabled} can opt in/out without HTS. A lookup failure rejects the
+   * operation rather than silently omitting defaults.
    */
   private boolean isColumnDefaultRamped(TableDto tableDto) throws ColumnDefaultException {
     if (columnDefaultsSource == ColumnDefaultsSource.NONE) {

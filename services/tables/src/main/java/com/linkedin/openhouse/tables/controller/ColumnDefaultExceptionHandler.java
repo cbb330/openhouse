@@ -15,7 +15,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
-/** Keeps checked, pre-commit column-default failures out of the common catch-all handler. */
+/** Keeps checked column-default failures out of the common catch-all handler. */
 @Slf4j
 @Order(Ordered.HIGHEST_PRECEDENCE)
 @RestControllerAdvice(assignableTypes = {TablesController.class, IcebergSnapshotsController.class})
@@ -35,7 +35,7 @@ public class ColumnDefaultExceptionHandler {
     String requestId = UUID.randomUUID().toString();
     HttpStatus status = status(failure);
     log.error(
-        "Column-default write rejected: requestId={} reason={} origin={} table={}.{} fieldId={} column={} sourceType={} targetType={}",
+        "Column-default operation failed: requestId={} reason={} origin={} table={}.{} fieldId={} column={} sourceType={} targetType={}",
         requestId,
         failure.getReason(),
         failure.getOrigin(),
@@ -83,11 +83,11 @@ public class ColumnDefaultExceptionHandler {
     String context = context(failure);
     switch (failure.getReason()) {
       case UNAVAILABLE:
-        return "Write rejected before commit"
+        return "Column-default validation failed"
             + context
             + ": column-default metadata or configuration is temporarily unavailable. Retry later.";
       case INTERNAL:
-        return "Write rejected before commit"
+        return "Column-default validation failed"
             + context
             + ": an internal error prevented column-default validation. Contact support with requestId "
             + requestId
@@ -108,24 +108,24 @@ public class ColumnDefaultExceptionHandler {
       case OUT_OF_RANGE:
         String issue = validationIssue(failure.getReason());
         if (failure.getOrigin() == Origin.INCOMING) {
-          return "Write rejected before commit"
+          return "Column-default validation failed"
               + context
               + ": "
               + issue
               + ". Correct the incoming schema or column default before submitting again.";
         }
         if (failure.getOrigin() == Origin.STORED) {
-          return "Write rejected before commit"
+          return "Column-default validation failed"
               + context
               + ": stored column-default metadata needs repair ("
               + issue
               + "). Contact the table owner or support with requestId "
               + requestId
-              + "; retrying the same write will not repair the metadata.";
+              + "; retrying unchanged will not repair the metadata.";
         }
-        return "Write rejected before commit"
+        return "Column-default validation failed"
             + context
-            + ": column-default validation failed ("
+            + ": unusable column-default metadata ("
             + issue
             + "). Contact support with requestId "
             + requestId

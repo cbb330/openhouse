@@ -26,7 +26,7 @@ public interface TablesApiHandler {
    * @return the table response body that would be returned to the client.
    */
   ApiResponse<GetTableResponseBody> getTable(
-      String databaseId, String tableId, String actingPrincipal);
+      String databaseId, String tableId, String actingPrincipal) throws ColumnDefaultException;
 
   /**
    * Function to Get all Table Resources in a given databaseId by filters and return requested

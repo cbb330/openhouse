@@ -51,7 +51,9 @@ public class TablesController {
         @ApiResponse(responseCode = "200", description = "Table GET: OK"),
         @ApiResponse(responseCode = "401", description = "Table GET: UNAUTHORIZED"),
         @ApiResponse(responseCode = "403", description = "Table GET: FORBIDDEN"),
-        @ApiResponse(responseCode = "404", description = "Table GET: NOT_FOUND")
+        @ApiResponse(responseCode = "404", description = "Table GET: NOT_FOUND"),
+        @ApiResponse(responseCode = "500", description = "Stored column defaults are unusable"),
+        @ApiResponse(responseCode = "503", description = "Column-default dependency unavailable")
       })
   @GetMapping(
       value = {
@@ -62,7 +64,8 @@ public class TablesController {
   @Secured(value = Privileges.Privilege.GET_TABLE_METADATA)
   public ResponseEntity<GetTableResponseBody> getTable(
       @Parameter(description = "Database ID", required = true) @PathVariable String databaseId,
-      @Parameter(description = "Table ID", required = true) @PathVariable String tableId) {
+      @Parameter(description = "Table ID", required = true) @PathVariable String tableId)
+      throws ColumnDefaultException {
 
     com.linkedin.openhouse.common.api.spec.ApiResponse<GetTableResponseBody> apiResponse =
         tablesApiHandler.getTable(databaseId, tableId, extractAuthenticatedUserPrincipal());

@@ -15,6 +15,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -29,6 +30,7 @@ import com.linkedin.openhouse.tables.api.handler.impl.OpenHouseIcebergSnapshotsA
 import com.linkedin.openhouse.tables.api.handler.impl.OpenHouseTablesApiHandler;
 import com.linkedin.openhouse.tables.api.spec.v0.request.CreateUpdateTableRequestBody;
 import com.linkedin.openhouse.tables.api.spec.v0.request.IcebergSnapshotsRequestBody;
+import com.linkedin.openhouse.tables.api.spec.v0.response.GetTableResponseBody;
 import com.linkedin.openhouse.tables.api.validator.IcebergSnapshotsApiValidator;
 import com.linkedin.openhouse.tables.api.validator.TablesApiValidator;
 import com.linkedin.openhouse.tables.controller.ColumnDefaultExceptionHandler;
@@ -83,6 +85,7 @@ class ColumnDefaultExceptionHandlerTest {
   private final OpenHouseInternalRepository repository = mock(OpenHouseInternalRepository.class);
   private final TablesServiceImpl tablesService = new TablesServiceImpl();
   private final IcebergSnapshotsServiceImpl snapshotsService = new IcebergSnapshotsServiceImpl();
+  private final OpenHouseTablesApiHandler tablesApi = new OpenHouseTablesApiHandler();
   private MockMvc mvc;
 
   @BeforeEach
@@ -92,6 +95,8 @@ class ColumnDefaultExceptionHandlerTest {
         .thenReturn(TABLE);
     when(mapper.toTableDto(any(TableDto.class), any(IcebergSnapshotsRequestBody.class)))
         .thenReturn(TABLE);
+    when(mapper.toGetTableResponseBody(any(TableDto.class)))
+        .thenReturn(GetTableResponseBody.builder().databaseId("db1").tableId("tb1").build());
     when(repository.findById(any(TableDtoPrimaryKey.class))).thenReturn(Optional.empty());
     TableUUIDGenerator uuidGenerator = mock(TableUUIDGenerator.class);
     when(uuidGenerator.generateUUID(any(CreateUpdateTableRequestBody.class)))
@@ -106,9 +111,9 @@ class ColumnDefaultExceptionHandlerTest {
       ReflectionTestUtils.setField(service, "authorizationUtils", mock(AuthorizationUtils.class));
       ReflectionTestUtils.setField(service, "readBridgeStripProtection", protection);
     }
-    OpenHouseTablesApiHandler tablesApi = new OpenHouseTablesApiHandler();
     ReflectionTestUtils.setField(tablesApi, "tableService", tablesService);
     ReflectionTestUtils.setField(tablesApi, "tablesApiValidator", mock(TablesApiValidator.class));
+    ReflectionTestUtils.setField(tablesApi, "tablesMapper", mapper);
     ReflectionTestUtils.setField(tablesApi, "clusterProperties", mock(ClusterProperties.class));
     OpenHouseIcebergSnapshotsApiHandler snapshotsApi = new OpenHouseIcebergSnapshotsApiHandler();
     ReflectionTestUtils.setField(snapshotsApi, "icebergSnapshotsService", snapshotsService);
@@ -125,6 +130,23 @@ class ColumnDefaultExceptionHandlerTest {
             .setControllerAdvice(
                 new OpenHouseExceptionHandler(), new ColumnDefaultExceptionHandler())
             .build();
+  }
+
+  @Test
+  void unusableStoredDefaultsFailGetInsteadOfReturningUnbridgedMetadata() throws Exception {
+    when(repository.findById(any(TableDtoPrimaryKey.class))).thenReturn(Optional.of(TABLE));
+    ReadBridgeConfigResolver resolver =
+        new ReadBridgeConfigResolver(
+            table -> {
+              throw new ColumnDefaultException(
+                  Reason.INVALID_SCHEMA, table, new IllegalArgumentException(SECRET));
+            },
+            (databaseId, tableId, featureId) -> true);
+    ReflectionTestUtils.setField(tablesApi, "readBridgeConfigResolver", resolver);
+
+    typedResponse(
+            get(TABLE_PATH).accept(MediaType.APPLICATION_JSON), Reason.INVALID_SCHEMA, 500, false)
+        .andExpect(jsonPath("$.config").doesNotHaveJsonPath());
   }
 
   @ParameterizedTest

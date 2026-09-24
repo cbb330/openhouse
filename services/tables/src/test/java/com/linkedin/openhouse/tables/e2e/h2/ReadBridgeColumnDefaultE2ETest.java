@@ -5,8 +5,10 @@ import static com.linkedin.openhouse.tables.model.TableModelConstants.GET_TABLE_
 import static com.linkedin.openhouse.tables.model.TableModelConstants.buildCreateUpdateTableRequestBody;
 import static com.linkedin.openhouse.tables.model.TableModelConstants.buildGetTableResponseBody;
 import static org.hamcrest.Matchers.is;
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -18,20 +20,30 @@ import com.jayway.jsonpath.JsonPath;
 import com.linkedin.openhouse.cluster.storage.StorageManager;
 import com.linkedin.openhouse.common.test.cluster.PropertyOverrideContextInitializer;
 import com.linkedin.openhouse.housetables.client.model.ToggleStatus;
+import com.linkedin.openhouse.tables.api.spec.v0.request.CreateUpdateTableRequestBody;
 import com.linkedin.openhouse.tables.api.spec.v0.response.GetTableResponseBody;
 import com.linkedin.openhouse.tables.mock.properties.AuthorizationPropertiesInitializer;
+import com.linkedin.openhouse.tables.model.TableDto;
+import com.linkedin.openhouse.tables.model.TableDtoPrimaryKey;
+import com.linkedin.openhouse.tables.readbridge.ColumnDefaultException;
+import com.linkedin.openhouse.tables.readbridge.ColumnDefaultException.Reason;
 import com.linkedin.openhouse.tables.readbridge.ColumnDefaultsSource;
 import com.linkedin.openhouse.tables.readbridge.ReadBridgeConfigResolver;
+import com.linkedin.openhouse.tables.repository.OpenHouseInternalRepository;
 import com.linkedin.openhouse.tables.toggle.TableFeatureToggle;
 import com.linkedin.openhouse.tables.toggle.model.TableToggleStatus;
 import com.linkedin.openhouse.tables.toggle.repository.ToggleStatusesRepository;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
+import java.util.function.Predicate;
 import org.apache.iceberg.SchemaParser;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -47,8 +59,9 @@ import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 
 /**
- * HTTP create/get stamps {@code config} from a stub {@link ColumnDefaultsSource} according to the
- * OpenHouse ramp. Deployment encoders are out of scope; resolver unit tests cover the same matrix.
+ * HTTP GET stamps {@code config} from a stub {@link ColumnDefaultsSource} according to the
+ * OpenHouse ramp; POST and PUT omit it. Writes validate defaults before commit without resolving
+ * response config afterward. Deployment encoders are out of scope.
  */
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -66,25 +79,46 @@ public class ReadBridgeColumnDefaultE2ETest {
       ReadBridgeConfigResolver.COLUMN_DEFAULT_FEATURE_ID
           + TableFeatureToggle.ENABLED_PROPERTY_SUFFIX;
 
+  static class TestDefaults implements ColumnDefaultsSource {
+    private volatile Predicate<TableDto> unavailableWhen = table -> false;
+
+    @Override
+    public Map<Integer, JsonNode> defaults(TableDto table) throws ColumnDefaultException {
+      if (unavailableWhen.test(table)) {
+        throw new ColumnDefaultException(Reason.UNAVAILABLE, table, null);
+      }
+      return Collections.singletonMap(2, TextNode.valueOf("US"));
+    }
+  }
+
   @TestConfiguration
   static class StubDefaults {
     @Bean
-    ColumnDefaultsSource stubColumnDefaults() {
-      return tableDto -> Collections.singletonMap(2, TextNode.valueOf("US"));
+    TestDefaults stubColumnDefaults() {
+      return new TestDefaults();
     }
   }
 
   @Autowired private MockMvc mvc;
   @Autowired private StorageManager storageManager;
   @Autowired private ToggleStatusesRepository toggleStatusesRepository;
+  @Autowired private TestDefaults defaults;
+  @Autowired private OpenHouseInternalRepository repository;
 
   private GetTableResponseBody created;
   private TableToggleStatus toggleStatus;
 
   @AfterEach
   public void tearDown() throws Exception {
+    defaults.unavailableWhen = table -> false;
     if (created != null) {
-      RequestAndValidateHelper.deleteTableAndValidateResponse(mvc, created);
+      if (repository.existsById(
+          TableDtoPrimaryKey.builder()
+              .databaseId(created.getDatabaseId())
+              .tableId(created.getTableId())
+              .build())) {
+        RequestAndValidateHelper.deleteTableAndValidateResponse(mvc, created);
+      }
       created = null;
     }
     if (toggleStatus != null) {
@@ -94,15 +128,12 @@ public class ReadBridgeColumnDefaultE2ETest {
   }
 
   @Test
-  public void createAndGet_stampsColumnDefaultConfigWhenEnabled() throws Exception {
+  public void createOmitsConfigAndGetStampsColumnDefaultsWhenEnabled() throws Exception {
     created = create(uniqueTable("prop_on"), Collections.singletonMap(ENABLED_PROP, "true"));
 
     MvcResult createdResult =
         RequestAndValidateHelper.createTableAndValidateResponse(created, mvc, storageManager);
-    assertEquals(
-        "\"US\"",
-        JsonPath.read(
-            createdResult.getResponse().getContentAsString(), "$.config['" + CONFIG_KEY + "']"));
+    jsonPath("$.config").doesNotExist().match(createdResult);
 
     getTable()
         .andExpect(status().isOk())
@@ -192,7 +223,8 @@ public class ReadBridgeColumnDefaultE2ETest {
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(buildCreateUpdateTableRequestBody(overlay).toJson())
                 .accept(MediaType.APPLICATION_JSON))
-        .andExpect(status().isOk());
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.config").doesNotExist());
 
     MvcResult after =
         getTable()
@@ -201,6 +233,155 @@ public class ReadBridgeColumnDefaultE2ETest {
             .andReturn();
     String schemaJson = JsonPath.read(after.getResponse().getContentAsString(), "$.schema");
     assertNull(SchemaParser.fromJson(schemaJson).findField(2).initialDefault());
+  }
+
+  @Test
+  public void createCommitsWithoutConfigWhenTheSourceFailsOnPersistedMetadata() throws Exception {
+    created = create(uniqueTable("create_outage"), Collections.singletonMap(ENABLED_PROP, "true"));
+    defaults.unavailableWhen = table -> table.getTableLocation() != null;
+
+    postTable(created)
+        .andExpect(status().isCreated())
+        .andExpect(jsonPath("$.config").doesNotExist());
+    assertTrue(
+        repository.existsById(
+            TableDtoPrimaryKey.builder()
+                .databaseId(created.getDatabaseId())
+                .tableId(created.getTableId())
+                .build()));
+    getTable()
+        .andExpect(status().isServiceUnavailable())
+        .andExpect(jsonPath("$.code", is("COLUMN_DEFAULT_UNAVAILABLE")));
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  public void updateCommitsWithoutConfigWhenTheSourceFailsOnNewMetadata(boolean replace)
+      throws Exception {
+    Map<String, String> props = new HashMap<>();
+    props.put(ENABLED_PROP, "true");
+    props.put("replace.enabled", "true");
+    created =
+        create(uniqueTable(replace ? "replace_outage" : "update_outage"), props)
+            .toBuilder()
+            .policies(null)
+            .build();
+    RequestAndValidateHelper.createTableAndValidateResponse(created, mvc, storageManager);
+    GetTableResponseBody current =
+        buildGetTableResponseBody(getTable().andExpect(status().isOk()).andReturn());
+    String previousLocation = current.getTableLocation();
+    ObjectMapper mapper = new ObjectMapper();
+    ObjectNode schema = (ObjectNode) mapper.readTree(current.getSchema());
+    if (replace) {
+      for (JsonNode field : schema.path("fields")) {
+        if (field.path("id").asInt() == 2) {
+          ((ObjectNode) field).put("initial-default", "US");
+        }
+      }
+    }
+    props = new HashMap<>(current.getTableProperties());
+    String marker = "test.read-bridge.updated";
+    props.put(marker, "true");
+    GetTableResponseBody update =
+        current.toBuilder().schema(schema.toString()).tableProperties(props).build();
+    CreateUpdateTableRequestBody request =
+        buildCreateUpdateTableRequestBody(update).toBuilder().replaceCommit(replace).build();
+    defaults.unavailableWhen = table -> !Objects.equals(previousLocation, table.getTableLocation());
+
+    MvcResult result =
+        putTable(update, request)
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.config").doesNotExist())
+            .andExpect(jsonPath("$.tableProperties['" + marker + "']", is("true")))
+            .andReturn();
+    String savedLocation =
+        JsonPath.read(result.getResponse().getContentAsString(), "$.tableLocation");
+    assertNotEquals(previousLocation, savedLocation);
+    getTable()
+        .andExpect(status().isServiceUnavailable())
+        .andExpect(jsonPath("$.code", is("COLUMN_DEFAULT_UNAVAILABLE")));
+  }
+
+  @Test
+  public void unavailableDefaultsRejectCreateWithoutPersistingATable() throws Exception {
+    created =
+        create(uniqueTable("create_rejected"), Collections.singletonMap(ENABLED_PROP, "true"));
+    defaults.unavailableWhen = table -> true;
+
+    postTable(created)
+        .andExpect(status().isServiceUnavailable())
+        .andExpect(jsonPath("$.code", is("COLUMN_DEFAULT_UNAVAILABLE")));
+    assertFalse(
+        repository.existsById(
+            TableDtoPrimaryKey.builder()
+                .databaseId(created.getDatabaseId())
+                .tableId(created.getTableId())
+                .build()));
+  }
+
+  @Test
+  public void unavailableIncomingDefaultsLeaveTheCommittedVersionUnchanged() throws Exception {
+    created =
+        create(uniqueTable("update_rejected"), Collections.singletonMap(ENABLED_PROP, "true"));
+    RequestAndValidateHelper.createTableAndValidateResponse(created, mvc, storageManager);
+    GetTableResponseBody current = buildGetTableResponseBody(getTable().andReturn());
+    String marker = "test.read-bridge.rejected";
+    Map<String, String> props = new HashMap<>(current.getTableProperties());
+    props.put(marker, "true");
+    GetTableResponseBody update = current.toBuilder().tableProperties(props).build();
+    defaults.unavailableWhen = table -> table.getTableProperties().containsKey(marker);
+
+    putTable(update, buildCreateUpdateTableRequestBody(update))
+        .andExpect(status().isServiceUnavailable())
+        .andExpect(jsonPath("$.code", is("COLUMN_DEFAULT_UNAVAILABLE")));
+    getTable()
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.tableLocation", is(current.getTableLocation())))
+        .andExpect(jsonPath("$.tableProperties['" + marker + "']").doesNotExist())
+        .andExpect(jsonPath("$.config['" + CONFIG_KEY + "']", is("\"US\"")));
+  }
+
+  @Test
+  public void unchangedPutOmitsConfigWithoutCreatingANewMetadataVersion() throws Exception {
+    created = create(uniqueTable("unchanged"), Collections.singletonMap(ENABLED_PROP, "true"));
+    RequestAndValidateHelper.createTableAndValidateResponse(created, mvc, storageManager);
+    GetTableResponseBody current =
+        buildGetTableResponseBody(getTable().andExpect(status().isOk()).andReturn());
+
+    putTable(current, buildCreateUpdateTableRequestBody(current))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.tableLocation", is(current.getTableLocation())))
+        .andExpect(jsonPath("$.config").doesNotExist());
+    getTable()
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.tableLocation", is(current.getTableLocation())))
+        .andExpect(jsonPath("$.config['" + CONFIG_KEY + "']", is("\"US\"")));
+  }
+
+  private ResultActions postTable(GetTableResponseBody table) throws Exception {
+    return mvc.perform(
+        MockMvcRequestBuilders.post(
+                ValidationUtilities.CURRENT_MAJOR_VERSION_PREFIX
+                    + "/databases/"
+                    + table.getDatabaseId()
+                    + "/tables")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content(buildCreateUpdateTableRequestBody(table).toJson())
+            .accept(MediaType.APPLICATION_JSON));
+  }
+
+  private ResultActions putTable(GetTableResponseBody table, CreateUpdateTableRequestBody request)
+      throws Exception {
+    return mvc.perform(
+        MockMvcRequestBuilders.put(
+                ValidationUtilities.CURRENT_MAJOR_VERSION_PREFIX
+                    + "/databases/"
+                    + table.getDatabaseId()
+                    + "/tables/"
+                    + table.getTableId())
+            .contentType(MediaType.APPLICATION_JSON)
+            .content(request.toJson())
+            .accept(MediaType.APPLICATION_JSON));
   }
 
   private void activateHtsToggle(GetTableResponseBody table) {

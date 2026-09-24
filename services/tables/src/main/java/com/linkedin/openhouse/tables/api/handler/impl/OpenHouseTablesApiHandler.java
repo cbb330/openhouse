@@ -39,19 +39,19 @@ public class OpenHouseTablesApiHandler implements TablesApiHandler {
 
   @Autowired private ReadBridgeConfigResolver readBridgeConfigResolver;
 
-  /** Request-time {@code config} stamp; mapper leaves it null. */
-  private GetTableResponseBody withConfig(GetTableResponseBody body, TableDto tableDto) {
-    return body.toBuilder().config(readBridgeConfigResolver.resolve(tableDto)).build();
-  }
-
   @Override
   public ApiResponse<GetTableResponseBody> getTable(
-      String databaseId, String tableId, String actingPrincipal) {
+      String databaseId, String tableId, String actingPrincipal) throws ColumnDefaultException {
     tablesApiValidator.validateGetTable(databaseId, tableId);
     TableDto tableDto = tableService.getTable(databaseId, tableId, actingPrincipal);
     return ApiResponse.<GetTableResponseBody>builder()
         .httpStatus(HttpStatus.OK)
-        .responseBody(withConfig(tablesMapper.toGetTableResponseBody(tableDto), tableDto))
+        .responseBody(
+            tablesMapper
+                .toGetTableResponseBody(tableDto)
+                .toBuilder()
+                .config(readBridgeConfigResolver.resolve(tableDto))
+                .build())
         .build();
   }
 
@@ -104,7 +104,7 @@ public class OpenHouseTablesApiHandler implements TablesApiHandler {
     TableDto tableDto = putResult.getFirst();
     return ApiResponse.<GetTableResponseBody>builder()
         .httpStatus(HttpStatus.CREATED)
-        .responseBody(withConfig(tablesMapper.toGetTableResponseBody(tableDto), tableDto))
+        .responseBody(tablesMapper.toGetTableResponseBody(tableDto))
         .build();
   }
 
@@ -123,7 +123,7 @@ public class OpenHouseTablesApiHandler implements TablesApiHandler {
     TableDto tableDto = putResult.getFirst();
     return ApiResponse.<GetTableResponseBody>builder()
         .httpStatus(status)
-        .responseBody(withConfig(tablesMapper.toGetTableResponseBody(tableDto), tableDto))
+        .responseBody(tablesMapper.toGetTableResponseBody(tableDto))
         .build();
   }
 
